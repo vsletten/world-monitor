@@ -1,0 +1,21 @@
+{
+  "name": "aegis-command",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AEGIS // Global Strategic Situation Room Dashboard",
+  "scripts": {
+    "dev": "vite --port 4173 --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --port 4173 --host 127.0.0.1"
+  },
+  "dependencies": {
+    "d3-geo": "^3.1.1",
+    "satellite.js": "^7.2.0",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2"
+  },
+  "devDependencies": {
+    "vite": "^6.2.0"
+  }
+}

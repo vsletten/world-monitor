@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="cyan">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AEGIS // GLOBAL STRATEGIC SITUATION ROOM</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body class="crt-enabled">
+  <!-- Subtle CRT & Vignette Overlays -->
+  <div class="crt-overlay" aria-hidden="true"></div>
+  <div class="alert-vignette" id="alertVignette" aria-hidden="true"></div>
+
+  <div class="command-shell" id="commandShell">
+    <!-- TOP TELEMETRY BAR -->
+    <header class="top-bar">
+      <div class="brand-cluster">
+        <div class="brand-emblem">
+          <svg viewBox="0 0 28 28" width="22" height="22" aria-hidden="true">
+            <polygon points="14,2 25,8.5 25,19.5 14,26 3,19.5 3,8.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <circle cx="14" cy="14" r="5" fill="none" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="14" y1="2" x2="14" y2="9" stroke="currentColor" stroke-width="1"/>
+            <line x1="14" y1="19" x2="14" y2="26" stroke="currentColor" stroke-width="1"/>
+            <line x1="3" y1="14" x2="9" y2="14" stroke="currentColor" stroke-width="1"/>
+            <line x1="19" y1="14" x2="25" y2="14" stroke="currentColor" stroke-width="1"/>
+            <circle cx="14" cy="14" r="1.8" fill="currentColor"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title">AEGIS <span class="sep">//</span> GLOBAL SITUATION ROOM</div>
+          <div class="brand-sub">SYS.REV 4.9.2 <span class="dot-sep">•</span> CLEARANCE: <span class="classified-badge">TS // SI-TK // NOFORN</span></div>
+        </div>
+      </div>
+
+      <div class="defcon-cluster" title="Click to cycle DEFCON readiness level">
+        <button class="defcon-btn" id="defconBtn" data-level="3">
+          <span class="defcon-label">READINESS</span>
+          <span class="defcon-val" id="defconVal">DEFCON 3</span>
+          <span class="defcon-pips" id="defconPips">
+            <i data-d="5"></i><i data-d="4"></i><i data-d="3"></i><i data-d="2"></i><i data-d="1"></i>
+          </span>
+        </button>
+      </div>
+
+      <div class="clocks-cluster">
+        <div class="clock-item primary-clock">
+          <span class="clock-zone">ZULU / UTC</span>
+          <span class="clock-time" id="clockUtc">00:00:00</span>
+        </div>
+        <div class="clock-item">
+          <span class="clock-zone">LANGLEY</span>
+          <span class="clock-time" id="clockLangley">00:00</span>
+        </div>
+        <div class="clock-item">
+          <span class="clock-zone">LONDON</span>
+          <span class="clock-time" id="clockLondon">00:00</span>
+        </div>
+        <div class="clock-item">
+          <span class="clock-zone">MOSCOW</span>
+          <span class="clock-time" id="clockMoscow">00:00</span>
+        </div>
+        <div class="clock-item">
+          <span class="clock-zone">TOKYO</span>
+          <span class="clock-time" id="clockTokyo">00:00</span>
+        </div>
+      </div>
+
+      <div class="top-controls">
+        <div class="segmented-control" role="group" aria-label="Projection mode">
+          <button class="seg-btn active" id="btnMode2D" data-mode="2d">2D MAP</button>
+          <button class="seg-btn" id="btnMode3D" data-mode="3d">3D GLOBE</button>
+        </div>
+
+        <div class="segmented-control panel-controls" role="group" aria-label="Sidebar layout">
+          <button class="seg-btn active" id="btnToggleLeft" title="Slide left sidebar in/out ([)" aria-pressed="true">◧</button>
+          <button class="seg-btn" id="btnMapOnly" title="Toggle map-only view (H)" aria-pressed="false">MAP ONLY</button>
+          <button class="seg-btn active" id="btnToggleRight" title="Slide right sidebar in/out (])" aria-pressed="true">◨</button>
+        </div>
+
+        <button class="hud-btn accent-action" id="btnTrace" title="Run multi-hop signal trace [T]">
+          <span class="pulse-dot"></span>TRACE
+        </button>
+        <button class="hud-btn warn-action" id="btnSimAlert" title="Trigger tactical breach simulation [A]">
+          ALERT
+        </button>
+
+        <div class="theme-dots" role="group" aria-label="HUD color theme">
+          <button class="theme-dot active" data-theme="cyan" title="NORAD Cyan"></button>
+          <button class="theme-dot" data-theme="amber" title="MI6 Amber"></button>
+          <button class="theme-dot" data-theme="emerald" title="ECHELON Emerald"></button>
+          <button class="theme-dot" data-theme="crimson" title="DEFCON Crimson"></button>
+        </div>
+
+        <button class="hud-btn icon-btn" id="btnAudio" title="Toggle synthesized HUD audio [M]" aria-pressed="false">
+          SFX OFF
+        </button>
+        <button class="hud-btn icon-btn active" id="btnCrt" title="Toggle CRT scanlines" aria-pressed="true">
+          CRT
+        </button>
+        <button class="hud-btn icon-btn" id="btnFullscreen" title="Fullscreen command wall [F]">
+          ⛶
+        </button>
+      </div>
+    </header>
+
+    <!-- MAIN WORKSPACE GRID -->
+    <main class="ops-grid" id="opsGrid">
+      <!-- LEFT COLUMN: OPERATIONS, SATELLITES, TELEMETRY -->
+      <aside class="side-col left-col" id="leftCol">
+        <div class="side-col-inner" data-col="left">
+        <!-- ACTIVE HOTSPOTS / OPERATIONS -->
+        <section class="hud-panel panel-ops" data-panel-id="ops" data-default-weight="44">
+          <div class="panel-header">
+            <span class="panel-title"><i class="led led-accent"></i>ACTIVE OPERATIONS</span>
+            <div class="panel-header-right">
+              <span class="panel-meta" id="opsCountMeta">16 NODES // 4 CRIT</span>
+              <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
+            </div>
+          </div>
+          <div class="panel-filter-row" id="nodeFilterRow">
+            <button class="micro-tab active" data-filter="ALL">ALL</button>
+            <button class="micro-tab" data-filter="CRITICAL">CRIT</button>
+            <button class="micro-tab" data-filter="WARNING">WARN</button>
+            <button class="micro-tab" data-filter="ALLIED">ALLY</button>
+            <button class="micro-tab" data-filter="COVERT">CVRT</button>
+          </div>
+          <div class="ops-list scroll-thin" id="opsList"></div>
+        </section>
+
+        <div class="panel-splitter" role="separator" aria-orientation="horizontal" title="Drag to resize • Double-click to reset"></div>
+
+        <!-- ORBITAL ASSETS / SATCOM -->
+        <section class="hud-panel panel-sat" data-panel-id="sat" data-default-weight="32">
+          <div class="panel-header">
+            <span class="panel-title"><i class="led led-ok"></i>ORBITAL ASSETS (LEO/GEO)</span>
+            <div class="panel-header-right">
+              <span class="panel-meta" id="satLockMeta">5 TRACKED</span>
+              <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
+            </div>
+          </div>
+          <div class="sat-list scroll-thin" id="satList"></div>
+        </section>
+
+        <div class="panel-splitter" role="separator" aria-orientation="horizontal" title="Drag to resize • Double-click to reset"></div>
+
+        <!-- SYSTEM TELEMETRY -->
+        <section class="hud-panel panel-sys" data-panel-id="sys" data-default-weight="24">
+          <div class="panel-header">
+            <span class="panel-title"><i class="led led-accent"></i>CRYPTO &amp; LINK TELEMETRY</span>
+            <div class="panel-header-right">
+              <span class="panel-meta" id="sysUptimeMeta">UP 99.98%</span>
+              <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
+            </div>
+          </div>
+          <div class="sys-metrics scroll-thin">
+            <div class="meter-row">
+              <span class="meter-label">QUANTUM DECRYPT</span>
+              <div class="meter-bar"><div class="meter-fill" id="meterDecrypt" style="width: 74%"></div></div>
+              <span class="meter-val" id="valDecrypt">74%</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">SIGINT THROUGHPUT</span>
+              <div class="meter-bar"><div class="meter-fill" id="meterSigint" style="width: 62%"></div></div>
+              <span class="meter-val" id="valSigint">18.4 Gb/s</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">MESH INTEGRITY</span>
+              <div class="meter-bar"><div class="meter-fill meter-ok" id="meterMesh" style="width: 96%"></div></div>
+              <span class="meter-val" id="valMesh">96%</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">ANOMALY INDEX</span>
+              <div class="meter-bar"><div class="meter-fill meter-warn" id="meterThreat" style="width: 38%"></div></div>
+              <span class="meter-val" id="valThreat">38.2</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">SOLAR Kp (NOAA)</span>
+              <div class="meter-bar"><div class="meter-fill meter-ok" id="meterSolar" style="width: 18%"></div></div>
+              <span class="meter-val" id="valSolar">SYNC..</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">RIPE BGP LIVE</span>
+              <div class="meter-bar"><div class="meter-fill" id="meterBgp" style="width: 24%"></div></div>
+              <span class="meter-val" id="valBgp">SYNC..</span>
+            </div>
+          </div>
+        </section>
+        </div>
+      </aside>
+
+      <div class="col-resizer" id="leftColResizer" data-side="left" role="separator" aria-orientation="vertical" title="Drag to resize left sidebar • Double-click to reset"></div>
+
+      <!-- CENTER STAGE: WIREFRAME WORLD MAP / 3D GLOBE -->
+      <section class="map-stage hud-panel" id="mapStage">
+        <canvas id="worldCanvas"></canvas>
+
+        <!-- Sliding Sidebar Edge Dock Handles -->
+        <button class="dock-handle dock-left" id="dockLeftBtn" title="Slide left sidebar ([)" aria-label="Toggle left sidebar">‹</button>
+        <button class="dock-handle dock-right" id="dockRightBtn" title="Slide right sidebar (])" aria-label="Toggle right sidebar">›</button>
+
+        <!-- Floating Top-Left Map HUD Telemetry -->
+        <div class="map-hud-tl">
+          <div class="map-hud-title" id="mapProjectionLabel">PROJ: EQUIRECTANGULAR WIREFRAME // WGS-84</div>
+          <div class="map-hud-sub" id="mapTelemetryLine">TRACKING 16 ASSETS • 14 ACTIVE RELAYS • 5 ORBITAL BIRDS</div>
+        </div>
+
+        <!-- Floating Top-Right Map Quick Actions -->
+        <div class="map-hud-tr">
+          <button class="map-mini-btn" id="btnZoomIn" title="Zoom in">+</button>
+          <button class="map-mini-btn" id="btnZoomOut" title="Zoom out">−</button>
+          <button class="map-mini-btn" id="btnResetView" title="Reset map view [R]">⌖</button>
+          <button class="map-mini-btn" id="btnAutoRotate" title="Toggle 3D auto-spin" style="display:none;">⟳</button>
+        </div>
+
+        <!-- Active Trace / Alert Banner Overlay -->
+        <div class="map-banner hidden" id="mapBanner">
+          <div class="banner-tag" id="bannerTag">SIGNAL TRACE ACTIVE</div>
+          <div class="banner-msg" id="bannerMsg">ACQUIRING RELAY HOP 1/6...</div>
+          <div class="banner-progress"><div class="banner-progress-fill" id="bannerProgress"></div></div>
+        </div>
+
+        <!-- Hover Tooltip -->
+        <div class="map-tooltip hidden" id="mapTooltip"></div>
+
+        <!-- Floating Bottom-Left Collapsible 10-Dataset Switchboard -->
+        <div class="map-hud-bl feed-switchboard" id="feedSwitchboard" role="group" aria-label="Toggle live and simulated datasets">
+          <div class="feed-bar-head">
+            <button class="feed-collapse-btn" id="btnToggleFeedTray" title="Collapse/expand data feeds tray">
+              <span class="feed-head-title" id="feedTraySummary">DATA FEEDS [10/10]</span>
+              <span id="feedTrayChevron">▾</span>
+            </button>
+            <div class="feed-head-actions">
+              <button class="feed-mini-act" id="btnFeedsAll" title="Enable all 10 datasets">ALL</button>
+              <button class="feed-mini-act" id="btnFeedsLiveOnly" title="Show real public live feeds only (hide Spy Ops)">LIVE</button>
+              <button class="feed-mini-act" id="btnFeedsClear" title="Mute all datasets (wireframe only)">NONE</button>
+              <button class="feed-refresh-btn" id="btnRefreshFeeds" title="Force refresh all enabled live public APIs">↻</button>
+            </div>
+          </div>
+          <div class="feed-grid" id="feedGrid">
+            <button class="feed-chip active" data-feed="spyOps" title="Simulated spy operations, arcs & SIGINT">
+              <i class="feed-led led-spy"></i>SPY OPS <b id="cntSpyOps">16</b>
+            </button>
+            <button class="feed-chip active" data-feed="liveSats" title="Live CelesTrak NORAD satellites & ISS (SGP4)">
+              <i class="feed-led led-sat" id="ledLiveSats"></i>ISS/SATS <b id="cntLiveSats">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="quakes" title="Live USGS earthquakes (M2.5+ 24h)">
+              <i class="feed-led led-quake" id="ledQuakes"></i>QUAKES <b id="cntQuakes">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="eonet" title="Live NASA EONET wildfires, volcanoes & storms">
+              <i class="feed-led led-eonet" id="ledEonet"></i>EONET <b id="cntEonet">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="aircraft" title="Live ADS-B military & tactical aircraft">
+              <i class="feed-led led-air" id="ledAircraft"></i>MIL ADS-B <b id="cntAircraft">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="bgp" title="Live RIPE RIS BGP global routing WebSocket stream">
+              <i class="feed-led led-bgp" id="ledBgp"></i>BGP LIVE <b id="cntBgp">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="gdacs" title="Live UN/EU GDACS global disaster & crisis alerts">
+              <i class="feed-led led-gdacs" id="ledGdacs"></i>GDACS <b id="cntGdacs">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="meteo" title="Live Open-Meteo global wind vectors & temperatures">
+              <i class="feed-led led-meteo" id="ledMeteo"></i>METEO <b id="cntMeteo">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="wiki" title="Live Wikipedia multi-language global edit pulse">
+              <i class="feed-led led-wiki" id="ledWiki"></i>WIKI <b id="cntWiki">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="solar" title="Live NOAA geomagnetic Kp & polar aurora ovals">
+              <i class="feed-led led-solar" id="ledSolar"></i>SOLAR <b id="cntSolar">..</b>
+            </button>
+          </div>
+        </div>
+
+        <!-- Floating Bottom-Right Live Coordinate Crosshair Readout -->
+        <div class="map-hud-br">
+          <span id="coordReadout">LAT +00.0000°  LON +000.0000°  //  GRID 31N</span>
+        </div>
+      </section>
+
+      <div class="col-resizer" id="rightColResizer" data-side="right" role="separator" aria-orientation="vertical" title="Drag to resize right sidebar • Double-click to reset"></div>
+
+      <!-- RIGHT COLUMN: TARGET DOSSIER, RF SPECTRUM, INTERCEPT LOG -->
+      <aside class="side-col right-col" id="rightCol">
+        <div class="side-col-inner" data-col="right">
+        <!-- LOCKED TARGET DOSSIER + PPI RADAR -->
+        <section class="hud-panel panel-dossier" data-panel-id="dossier" data-default-weight="38">
+          <div class="panel-header">
+            <span class="panel-title"><i class="led led-crit" id="dossierLed"></i>TARGET DOSSIER</span>
+            <div class="panel-header-right">
+              <span class="panel-meta" id="dossierCode">LOCKED // ZRH-04</span>
+              <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
+            </div>
+          </div>
+          <div class="dossier-body scroll-thin">
+            <div class="dossier-top">
+              <div class="radar-wrap">
+                <canvas id="radarCanvas" width="106" height="106"></canvas>
+                <span class="radar-tag" id="radarRngTag">RNG 50KM</span>
+              </div>
+              <div class="dossier-identity">
+                <div class="dossier-op" id="dossierOp">OP BLACKBRIAR</div>
+                <div class="dossier-loc" id="dossierLoc">ZURICH, SWITZERLAND</div>
+                <div class="dossier-coords" id="dossierCoords">47.3769° N, 8.5417° E</div>
+                <div class="dossier-badges">
+                  <span class="status-pill crit" id="dossierSeverity">CRITICAL</span>
+                  <span class="status-pill neutral" id="dossierCipher">AES-512-Q</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="dossier-brief" id="dossierBrief">
+              Encrypted burst transmissions detected from alpine financial relay vault. Pattern matches known shadow syndicate key exchange.
+            </div>
+
+            <div class="dossier-kv-grid">
+              <div class="kv-cell">
+                <span class="kv-k">SIGNAL</span>
+                <span class="kv-v" id="dossierSignal">-42 dBm</span>
+              </div>
+              <div class="kv-cell">
+                <span class="kv-k">FREQ</span>
+                <span class="kv-v" id="dossierFreq">14.285 MHz</span>
+              </div>
+              <div class="kv-cell">
+                <span class="kv-k">STATUS</span>
+                <span class="kv-v" id="dossierStatus">INTERCEPTING</span>
+              </div>
+            </div>
+
+            <div class="dossier-weather" id="dossierWeather">
+              <span class="wx-label">LOCAL WX</span>
+              <span class="wx-val" id="dossierWeatherVal">SYNCING OPEN-METEO...</span>
+            </div>
+
+            <div class="dossier-actions">
+              <button class="dossier-btn" id="btnDossierTrace">TRACE UPLINK</button>
+              <button class="dossier-btn" id="btnDossierDecrypt">DECRYPT BURST</button>
+              <button class="dossier-btn" id="btnDossierPing">SONAR PING</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="panel-splitter" role="separator" aria-orientation="horizontal" title="Drag to resize • Double-click to reset"></div>
+
+        <!-- LIVE GOES SOLAR X-RAY / MAGNETOMETER / BGP / RF SPECTRUM -->
+        <section class="hud-panel panel-spectrum" data-panel-id="spectrum" data-default-weight="24">
+          <div class="panel-header">
+            <span class="panel-title"><i class="led led-ok" id="spectrumLed"></i><span id="spectrumTitle">GOES SOLAR FLUX</span></span>
+            <div class="panel-header-right">
+              <div class="log-filters" id="spectrumModes" role="group" aria-label="Spectrum data source">
+                <button class="micro-tab active" data-spec="goes" title="Live NOAA GOES-18 X-Ray & GOES-19 Magnetometer">GOES</button>
+                <button class="micro-tab" data-spec="bgp" title="Live RIPE RIS BGP per-IXP spectrum">BGP</button>
+                <button class="micro-tab" data-spec="rf" title="Simulated SIGINT RF carrier spectrum">RF</button>
+              </div>
+              <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
+            </div>
+          </div>
+          <div class="spectrum-wrap">
+            <canvas id="spectrumCanvas"></canvas>
+          </div>
+        </section>
+
+        <div class="panel-splitter" role="separator" aria-orientation="horizontal" title="Drag to resize • Double-click to reset"></div>
+
+        <!-- LIVE INTERCEPT & EVENT STREAM -->
+        <section class="hud-panel panel-log" data-panel-id="log" data-default-weight="38">
+          <div class="panel-header">
+            <span class="panel-title"><i class="led led-warn"></i>INTERCEPT FEED</span>
+            <div class="panel-header-right">
+              <div class="log-filters" id="logFilters">
+                <button class="micro-tab active" data-log="ALL">ALL</button>
+                <button class="micro-tab" data-log="CRIT">CRIT</button>
+                <button class="micro-tab" data-log="SIG">SIG</button>
+                <button class="micro-tab" data-log="SAT">SAT</button>
+              </div>
+              <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
+            </div>
+          </div>
+          <div class="log-feed scroll-thin" id="logFeed"></div>
+        </section>
+        </div>
+      </aside>
+    </main>
+
+    <!-- BOTTOM COMMAND & LAYER BAR -->
+    <footer class="bottom-bar">
+      <div class="layer-toggles" id="layerToggles">
+        <button class="layer-pill active" data-layer="nodes" title="Toggle global asset nodes [1]"><em>1</em>NODES</button>
+        <button class="layer-pill active" data-layer="arcs" title="Toggle trajectory & data arcs [2]"><em>2</em>ARCS</button>
+        <button class="layer-pill" data-layer="satellites" title="Toggle simulated recon satellites [3]"><em>3</em>SIM SATS</button>
+        <button class="layer-pill active" data-layer="sigint" title="Toggle RF heat & interference pulses [4]"><em>4</em>SIGINT</button>
+        <button class="layer-pill active" data-layer="grid" title="Toggle lat/lon tactical graticule [5]"><em>5</em>GRID</button>
+        <button class="layer-pill active" data-layer="scan" title="Toggle sweep beam [6]"><em>6</em>SCAN</button>
+      </div>
+
+      <form class="cmd-form" id="cmdForm" autocomplete="off">
+        <span class="cmd-prompt">AEGIS://CMD &gt;</span>
+        <input
+          type="text"
+          id="cmdInput"
+          class="cmd-input"
+          placeholder="help, trace, focus tokyo, mode globe, theme amber, defcon 1..."
+          spellcheck="false"
+        />
+      </form>
+
+      <div class="bottom-telemetry">
+        <div class="spark-wrap" title="Global Threat Activity Index">
+          <span class="spark-label">THREAT</span>
+          <canvas id="sparkCanvas" width="84" height="20"></canvas>
+        </div>
+        <span class="link-badge"><i class="led led-ok"></i>AES-256-GCM</span>
+        <span class="fps-badge" id="fpsReadout">60 FPS</span>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
