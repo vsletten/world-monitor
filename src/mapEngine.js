@@ -12,11 +12,29 @@ import {
   geoDistance,
 } from 'd3-geo';
 import { feature, mesh } from 'topojson-client';
-import worldTopo from 'world-atlas/countries-110m.json';
+import worldTopo50 from 'world-atlas/countries-50m.json';
+import worldTopo110 from 'world-atlas/countries-110m.json';
+import {
+  getThemePalette,
+  getCachedCssVar,
+  getSubsolarPoint,
+  getNightCircleCenter,
+} from './utils.js';
+import { SUBSEA_CABLES } from './subseaCables.js';
 
-function getCssVar(name, fallback = '#00e5ff') {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
-}
+const HIT_PRIORITY_BIAS = {
+  node: 0,
+  liveSat: 1,
+  sat: 1.5,
+  gdacs: 1.5,
+  quake: 2,
+  eonet: 2,
+  aircraft: 2.5,
+  bgp: 3,
+  wiki: 3.5,
+  meteo: 4,
+  cable: 5,
+};
 
 export class WorldMapEngine {
   constructor(canvas, { nodes, arcs, satellites, liveFeeds, onSelectNode, onSelectSat, onSelectLive, onHover, onCoords }) {
@@ -41,21 +59,35 @@ export class WorldMapEngine {
     this.onHover = onHover;
     this.onCoords = onCoords;
 
-    // World vector geometry (Natural Earth 110m)
-    this.land = feature(worldTopo, worldTopo.objects.land);
-    this.borders = mesh(worldTopo, worldTopo.objects.countries, (a, b) => a !== b);
+    // Dual-resolution world vector geometry (Natural Earth 50m + 110m)
+    this.land50 = feature(worldTopo50, worldTopo50.objects.land);
+    this.borders50 = mesh(worldTopo50, worldTopo50.objects.countries, (a, b) => a !== b);
+    this.land110 = feature(worldTopo110, worldTopo110.objects.land);
+    this.borders110 = mesh(worldTopo110, worldTopo110.objects.countries, (a, b) => a !== b);
+    // Backwards-compatible aliases
+    this.land = this.land50;
+    this.borders = this.borders50;
+
     this.graticule = geoGraticule().step([15, 15])();
     this.equator = { type: 'LineString', coordinates: [[-180, 0], [-90, 0], [0, 0], [90, 0], [180, 0]] };
     this.primeMeridian = { type: 'LineString', coordinates: [[0, -85], [0, 0], [0, 85]] };
+
+    // Prebuilt GeoJSON LineStrings for subsea fiber trunk cables
+    this._cableGeoms = SUBSEA_CABLES.map((cable) => ({
+      cable,
+      geoLine: { type: 'LineString', coordinates: cable.coordinates },
+    }));
 
     // View & interaction state
     this.mode = '2d'; // '2d' | '3d'
     this.zoom = 1.0;
     this.panX = 0;
     this.panY = 0;
+    this.target2D = null; // { zoom, panX, panY }
     this.rotation = [-12, -22, 0]; // 3D globe rotation [lambda, phi, gamma]
     this.targetRotation = null;
     this.autoRotate = true;
+    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     this.layers = {
       nodes: true,
@@ -64,6 +96,8 @@ export class WorldMapEngine {
       sigint: true,
       grid: true,
       scan: true,
+      terminator: true,
+      cables: true,
       liveSats: true,
       quakes: true,
       eonet: true,
@@ -77,27 +111,40 @@ export class WorldMapEngine {
 
     this.selectedNodeId = 'zurich';
     this.selectedSatId = null;
-    this.selectedLive = null; // { kind: 'liveSat'|'quake'|'eonet'|'aircraft', id }
+    this.selectedLive = null; // { kind: 'liveSat'|'quake'|'eonet'|'aircraft'|'bgp'|'gdacs'|'meteo'|'wiki'|'cable', id }
     this.hoveredItem = null;
     this.alertActive = false;
 
     // Active trace animation state
-    this.trace = null; // { nodeIds: [], activeStep: 0, segProgress: 0, finished: false }
+    this.trace = null; // { waypoints: [{ id, lon, lat, label }], nodeIds: [], activeStep: 0, segProgress: 0, finished: false }
 
     // Expanding sonar ping rings
     this.pings = []; // { lon, lat, age, maxAge, colorVar }
 
-    // Mouse state
+    // Mouse & overlap hit-cycling state
     this.mouse = { x: -1, y: -1, inside: false };
     this.dragging = false;
     this.dragMoved = false;
     this.dragStart = { x: 0, y: 0, panX: 0, panY: 0, rot: [0, 0, 0] };
+    this._overlapCycleIdx = 0;
+    this._lastClickMeta = { x: -999, y: -999, ts: 0 };
 
-    // Animation timers
+    // Animation timers & caches
     this.time = 0;
     this.scanX = 0;
-    this.hatchPattern = null;
-    this.lastThemeAccent = '';
+    this._hatchTile = null;
+    this._hatchTileAccent = '';
+    this._hatchPatterns = new WeakMap();
+    this._dotTile = null;
+    this._dotTileAccent = '';
+    this._dotPatterns = new WeakMap();
+    this._baseCacheCanvas = null;
+    this._baseCacheCtx = null;
+    this._baseCacheKey = '';
+    this._terminatorCache = null;
+    this._auroraCache = null;
+    this._labelBoxes = [];
+    this._deferredLabels = [];
 
     this.resize();
     this._bindEvents();
@@ -108,34 +155,67 @@ export class WorldMapEngine {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const nextW = Math.max(300, Math.floor(rect.width));
     const nextH = Math.max(220, Math.floor(rect.height));
-    if (nextW === this.w && nextH === this.h) return;
+    if (nextW === this.w && nextH === this.h && dpr === this.dpr) return;
+    this.dpr = dpr;
     this.w = nextW;
     this.h = nextH;
-    this.canvas.width = this.w * dpr;
-    this.canvas.height = this.h * dpr;
+    this.canvas.width = Math.round(this.w * dpr);
+    this.canvas.height = Math.round(this.h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (this.land && this.time > 0) {
+    this.invalidateCache();
+    if (this.land50 && this.time > 0) {
       this.render(0);
     }
   }
 
-  _ensureHatchPattern(accentRgb) {
-    if (this.hatchPattern && this.lastThemeAccent === accentRgb) return this.hatchPattern;
-    this.lastThemeAccent = accentRgb;
-    const tile = document.createElement('canvas');
-    tile.width = 8;
-    tile.height = 8;
-    const tctx = tile.getContext('2d');
-    tctx.fillStyle = `rgba(${accentRgb}, 0.055)`;
-    tctx.fillRect(0, 0, 8, 8);
-    tctx.strokeStyle = `rgba(${accentRgb}, 0.13)`;
-    tctx.lineWidth = 0.7;
-    tctx.beginPath();
-    tctx.moveTo(0, 8);
-    tctx.lineTo(8, 0);
-    tctx.stroke();
-    this.hatchPattern = this.ctx.createPattern(tile, 'repeat');
-    return this.hatchPattern;
+  invalidateCache() {
+    this._baseCacheKey = '';
+  }
+
+  _ensureHatchPattern(ctx, accentRgb) {
+    if (this._hatchTileAccent !== accentRgb || !this._hatchTile) {
+      this._hatchTileAccent = accentRgb;
+      const tile = document.createElement('canvas');
+      tile.width = 8;
+      tile.height = 8;
+      const tctx = tile.getContext('2d');
+      tctx.fillStyle = `rgba(${accentRgb}, 0.055)`;
+      tctx.fillRect(0, 0, 8, 8);
+      tctx.strokeStyle = `rgba(${accentRgb}, 0.13)`;
+      tctx.lineWidth = 0.7;
+      tctx.beginPath();
+      tctx.moveTo(0, 8);
+      tctx.lineTo(8, 0);
+      tctx.stroke();
+      this._hatchTile = tile;
+      this._hatchPatterns = new WeakMap();
+    }
+    let pattern = this._hatchPatterns.get(ctx);
+    if (!pattern) {
+      pattern = ctx.createPattern(this._hatchTile, 'repeat');
+      this._hatchPatterns.set(ctx, pattern);
+    }
+    return pattern;
+  }
+
+  _ensureDotPattern(ctx, accentRgb) {
+    if (this._dotTileAccent !== accentRgb || !this._dotTile) {
+      this._dotTileAccent = accentRgb;
+      const tile = document.createElement('canvas');
+      tile.width = 36;
+      tile.height = 36;
+      const tctx = tile.getContext('2d');
+      tctx.fillStyle = `rgba(${accentRgb}, 0.08)`;
+      tctx.fillRect(18, 18, 1, 1);
+      this._dotTile = tile;
+      this._dotPatterns = new WeakMap();
+    }
+    let pattern = this._dotPatterns.get(ctx);
+    if (!pattern) {
+      pattern = ctx.createPattern(this._dotTile, 'repeat');
+      this._dotPatterns.set(ctx, pattern);
+    }
+    return pattern;
   }
 
   setMode(mode) {
@@ -143,7 +223,9 @@ export class WorldMapEngine {
     this.zoom = 1.0;
     this.panX = 0;
     this.panY = 0;
+    this.target2D = null;
     this.targetRotation = null;
+    this.invalidateCache();
     if (this.mode === '3d' && this.selectedNodeId) {
       const node = this.nodeById.get(this.selectedNodeId);
       if (node) this.focusLonLat(node.lon, node.lat);
@@ -151,33 +233,74 @@ export class WorldMapEngine {
   }
 
   setLayer(name, enabled) {
-    if (name in this.layers) this.layers[name] = Boolean(enabled);
+    if (name in this.layers) {
+      this.layers[name] = Boolean(enabled);
+      if (name === 'grid') this.invalidateCache();
+    }
   }
 
-  setZoom(delta) {
-    this.zoom = Math.max(0.85, Math.min(4.2, this.zoom + delta));
-    if (this.zoom <= 1.02 && this.mode === '2d') {
-      this.panX *= 0.5;
-      this.panY *= 0.5;
+  setZoom(delta, pivotX = null, pivotY = null) {
+    this.target2D = null;
+    const oldZoom = this.zoom;
+    const newZoom = Math.max(0.85, Math.min(4.2, oldZoom + delta));
+    if (newZoom === oldZoom) return;
+    this.zoom = newZoom;
+
+    if (this.mode === '2d') {
+      const ratio = newZoom / oldZoom;
+      if (pivotX !== null && pivotY !== null) {
+        const cx0 = this.w / 2;
+        const cy0 = this.h / 2 + this.h * 0.02;
+        this.panX = this.panX * ratio + (pivotX - cx0) * (1 - ratio);
+        this.panY = this.panY * ratio + (pivotY - cy0) * (1 - ratio);
+      } else {
+        this.panX *= ratio;
+        this.panY *= ratio;
+      }
+
+      if (this.zoom <= 1.02 && delta < 0) {
+        this.panX *= 0.5;
+        this.panY *= 0.5;
+      }
+
+      const maxPanX = this.w * 0.55 * this.zoom;
+      const maxPanY = this.h * 0.5 * this.zoom;
+      this.panX = Math.max(-maxPanX, Math.min(maxPanX, this.panX));
+      this.panY = Math.max(-maxPanY, Math.min(maxPanY, this.panY));
     }
   }
 
   resetView() {
-    this.zoom = 1.0;
-    this.panX = 0;
-    this.panY = 0;
-    this.targetRotation = [-12, -22, 0];
+    if (this.mode === '2d') {
+      this.target2D = { zoom: 1.0, panX: 0, panY: 0 };
+    } else {
+      this.zoom = 1.0;
+      this.panX = 0;
+      this.panY = 0;
+      this.target2D = null;
+      this.targetRotation = [-12, -22, 0];
+    }
   }
 
-  focusLonLat(lon, lat) {
+  focusLonLat(lon, lat, minZoom2D = 1.75) {
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
     if (this.mode === '3d') {
       this.targetRotation = [-lon, -Math.max(-65, Math.min(65, lat)), 0];
-    } else if (this.zoom > 1.05) {
-      const proj = this._getProjection();
-      const pt = proj([lon, lat]);
+    } else {
+      const targetZoom = Math.max(this.zoom, Math.min(4.2, minZoom2D));
+      const scaleX = this.w / (2 * Math.PI);
+      const scaleY = this.h / (Math.PI * 0.92);
+      const targetScale = Math.min(scaleX, scaleY) * 0.96 * targetZoom;
+      const baseProj = geoEquirectangular()
+        .scale(targetScale)
+        .translate([this.w / 2, this.h / 2 + this.h * 0.02]);
+      const pt = baseProj([lon, lat]);
       if (pt) {
-        this.panX += this.w / 2 - pt[0];
-        this.panY += this.h / 2 - pt[1];
+        const maxPanX = this.w * 0.55 * targetZoom;
+        const maxPanY = this.h * 0.5 * targetZoom;
+        const targetPanX = Math.max(-maxPanX, Math.min(maxPanX, this.w / 2 - pt[0]));
+        const targetPanY = Math.max(-maxPanY, Math.min(maxPanY, this.h / 2 - pt[1]));
+        this.target2D = { zoom: targetZoom, panX: targetPanX, panY: targetPanY };
       }
     }
   }
@@ -192,14 +315,14 @@ export class WorldMapEngine {
     if (focus) this.focusLonLat(node.lon, node.lat);
   }
 
-  selectSat(id) {
+  selectSat(id, focus = true) {
     const sat = this.satellites.find((s) => s.id === id);
     if (!sat) return;
     this.selectedSatId = id;
     this.selectedNodeId = null;
     this.selectedLive = null;
     this.triggerPing(sat.lon, sat.lat, '--ok');
-    this.focusLonLat(sat.lon, sat.lat);
+    if (focus) this.focusLonLat(sat.lon, sat.lat);
   }
 
   selectLive(kind, item, focus = true) {
@@ -216,6 +339,8 @@ export class WorldMapEngine {
         ? '--ok'
         : kind === 'bgp'
         ? '--covert'
+        : kind === 'cable'
+        ? '--secondary'
         : '--accent';
     this.triggerPing(item.lon, item.lat, colorVar);
     if (focus) this.focusLonLat(item.lon, item.lat);
@@ -225,14 +350,44 @@ export class WorldMapEngine {
     this.pings.push({ lon, lat, age: 0, maxAge: 1.6, colorVar });
   }
 
-  startTrace(nodeIds) {
+  _normalizeTraceWaypoint(wp) {
+    if (typeof wp === 'string') {
+      const node = this.nodeById.get(wp);
+      if (!node) return null;
+      return {
+        id: node.id,
+        lon: node.lon,
+        lat: node.lat,
+        label: node.code || node.city || node.id,
+      };
+    }
+    if (wp && typeof wp === 'object' && Number.isFinite(wp.lon) && Number.isFinite(wp.lat)) {
+      return {
+        id: wp.id || `${wp.lon.toFixed(2)},${wp.lat.toFixed(2)}`,
+        lon: wp.lon,
+        lat: wp.lat,
+        label: wp.label || wp.code || wp.callsign || wp.name || wp.id || '',
+      };
+    }
+    return null;
+  }
+
+  startTrace(waypoints) {
+    const normalized = (Array.isArray(waypoints) ? waypoints : [])
+      .map((wp) => this._normalizeTraceWaypoint(wp))
+      .filter(Boolean);
+    if (!normalized.length) {
+      this.trace = null;
+      return;
+    }
     this.trace = {
-      nodeIds,
+      waypoints: normalized,
+      nodeIds: normalized.map((w) => w.id),
       activeStep: 0,
       segProgress: 0,
       finished: false,
     };
-    const first = this.nodeById.get(nodeIds[0]);
+    const first = normalized[0];
     if (first) {
       this.triggerPing(first.lon, first.lat, '--accent');
       if (this.mode === '3d') this.focusLonLat(first.lon, first.lat);
@@ -244,10 +399,11 @@ export class WorldMapEngine {
     this.trace.activeStep = step;
     this.trace.segProgress = 0;
     this.trace.finished = finished;
-    const node = this.nodeById.get(this.trace.nodeIds[Math.min(step, this.trace.nodeIds.length - 1)]);
-    if (node) {
-      this.triggerPing(node.lon, node.lat, finished ? '--ok' : '--crit');
-      if (this.mode === '3d') this.focusLonLat(node.lon, node.lat);
+    const wps = this.trace.waypoints || [];
+    const wp = wps[Math.min(step, wps.length - 1)];
+    if (wp) {
+      this.triggerPing(wp.lon, wp.lat, finished ? '--ok' : '--crit');
+      if (this.mode === '3d') this.focusLonLat(wp.lon, wp.lat);
     }
   }
 
@@ -296,6 +452,7 @@ export class WorldMapEngine {
       this.dragMoved = false;
       this.canvas.classList.add('dragging');
       this.targetRotation = null;
+      this.target2D = null;
       this.dragStart = {
         x: e.clientX - rect.left,
         y: e.clientY - rect.top,
@@ -340,8 +497,23 @@ export class WorldMapEngine {
         this.onCoords?.(inv[1], inv[0]);
       }
 
-      // Hit test nodes & satellites
-      const hit = this._hitTest(mx, my, proj);
+      // Hit test all active layers (with overlap metadata)
+      const hits = this._hitTestAll(mx, my, proj);
+      let hit = null;
+      if (hits.length > 0) {
+        const now = Date.now();
+        const nearLastClick =
+          Math.hypot(mx - this._lastClickMeta.x, my - this._lastClickMeta.y) <= 14 &&
+          now - this._lastClickMeta.ts <= 4000;
+        const overlapIndex = hits.length > 1 && nearLastClick ? this._overlapCycleIdx % hits.length : 0;
+        const chosen = hits[overlapIndex];
+        hit = {
+          kind: chosen.kind,
+          item: chosen.item,
+          overlapCount: hits.length,
+          overlapIndex,
+        };
+      }
       this.hoveredItem = hit;
       this.canvas.style.cursor = hit ? 'pointer' : 'crosshair';
       this.onHover?.(hit, mx, my);
@@ -358,13 +530,35 @@ export class WorldMapEngine {
 
       if (!wasDrag) {
         const proj = this._getProjection();
-        const hit = this._hitTest(mx, my, proj);
-        if (hit) {
+        const hits = this._hitTestAll(mx, my, proj);
+        if (hits.length > 0) {
+          const now = Date.now();
+          const sameSpot =
+            Math.hypot(mx - this._lastClickMeta.x, my - this._lastClickMeta.y) <= 14 &&
+            now - this._lastClickMeta.ts <= 4000;
+          if (sameSpot && hits.length > 1) {
+            this._overlapCycleIdx = (this._overlapCycleIdx + 1) % hits.length;
+          } else {
+            this._overlapCycleIdx = 0;
+          }
+          this._lastClickMeta = { x: mx, y: my, ts: now };
+
+          const overlapIndex = this._overlapCycleIdx % hits.length;
+          const chosen = hits[overlapIndex];
+          const hit = {
+            kind: chosen.kind,
+            item: chosen.item,
+            overlapCount: hits.length,
+            overlapIndex,
+          };
+          this.hoveredItem = hit;
+          this.onHover?.(hit, mx, my);
+
           if (hit.kind === 'node') {
             this.selectNode(hit.item.id, false);
             this.onSelectNode?.(hit.item);
           } else if (hit.kind === 'sat') {
-            this.selectSat(hit.item.id);
+            this.selectSat(hit.item.id, false);
             this.onSelectSat?.(hit.item);
           } else {
             this.selectLive(hit.kind, hit.item, false);
@@ -384,26 +578,38 @@ export class WorldMapEngine {
       'wheel',
       (e) => {
         e.preventDefault();
-        const delta = e.deltaY < 0 ? 0.18 : -0.18;
-        this.setZoom(delta);
+        const rect = this.canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const raw = -e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0018);
+        const delta = Math.max(-0.38, Math.min(0.38, raw)) * Math.max(0.8, this.zoom * 0.65);
+        this.setZoom(delta, mx, my);
       },
       { passive: false }
     );
   }
 
-  _hitTest(mx, my, proj) {
-    let best = null;
-    let bestDist = 17;
+  _distToSegment(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-6) return Math.hypot(px - x1, py - y1);
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+  }
+
+  _hitTestAll(mx, my, proj) {
+    const hits = [];
 
     const testList = (list, kind, radius = 17) => {
+      const bias = HIT_PRIORITY_BIAS[kind] ?? 3;
       for (const item of list) {
         if (!this._isVisible3D(item.lon, item.lat)) continue;
         const pt = proj([item.lon, item.lat]);
         if (!pt) continue;
-        const d = Math.hypot(mx - pt[0], my - pt[1]);
-        if (d < bestDist && d < radius) {
-          bestDist = d;
-          best = { kind, item };
+        const dist = Math.hypot(mx - pt[0], my - pt[1]);
+        if (dist < radius) {
+          hits.push({ kind, item, dist, score: dist + bias });
         }
       }
     };
@@ -422,7 +628,57 @@ export class WorldMapEngine {
       if (this.layers.wiki) testList(this.liveFeeds.data.wikiHubs, 'wiki', 14);
     }
 
-    return best;
+    if (this.layers.cables) {
+      const cableBias = HIT_PRIORITY_BIAS.cable;
+      const cableRadius = 12;
+      for (const { cable } of this._cableGeoms) {
+        let minDist = Infinity;
+
+        // Check midpoint anchor
+        if (this._isVisible3D(cable.lon, cable.lat)) {
+          const mpt = proj([cable.lon, cable.lat]);
+          if (mpt) {
+            const md = Math.hypot(mx - mpt[0], my - mpt[1]);
+            if (md < minDist) minDist = md;
+          }
+        }
+
+        // Check projected vertices and segments
+        const coords = cable.coordinates;
+        let prevPt = null;
+        for (let i = 0; i < coords.length; i++) {
+          const [lon, lat] = coords[i];
+          if (!this._isVisible3D(lon, lat)) {
+            prevPt = null;
+            continue;
+          }
+          const pt = proj([lon, lat]);
+          if (!pt) {
+            prevPt = null;
+            continue;
+          }
+          const vd = Math.hypot(mx - pt[0], my - pt[1]);
+          if (vd < minDist) minDist = vd;
+          if (prevPt && Math.abs(pt[0] - prevPt[0]) <= this.w * 0.4) {
+            const sd = this._distToSegment(mx, my, prevPt[0], prevPt[1], pt[0], pt[1]);
+            if (sd < minDist) minDist = sd;
+          }
+          prevPt = pt;
+        }
+
+        if (minDist < cableRadius) {
+          hits.push({ kind: 'cable', item: cable, dist: minDist, score: minDist + cableBias });
+        }
+      }
+    }
+
+    hits.sort((a, b) => a.score - b.score || a.dist - b.dist);
+    return hits;
+  }
+
+  _hitTest(mx, my, proj) {
+    const hits = this._hitTestAll(mx, my, proj);
+    return hits.length ? { kind: hits[0].kind, item: hits[0].item } : null;
   }
 
   _updateSatellites() {
@@ -434,10 +690,47 @@ export class WorldMapEngine {
     }
   }
 
+  _tryPlaceLabel(x, y, w, h, force = false) {
+    const pad = 2;
+    const bx = x - pad;
+    const by = y - pad;
+    const bw = w + pad * 2;
+    const bh = h + pad * 2;
+    if (!force) {
+      for (let i = 0; i < this._labelBoxes.length; i++) {
+        const b = this._labelBoxes[i];
+        if (bx < b.x + b.w && bx + bw > b.x && by < b.y + b.h && by + bh > b.y) {
+          return false;
+        }
+      }
+    }
+    this._labelBoxes.push({ x: bx, y: by, w: bw, h: bh });
+    return true;
+  }
+
+  _queueLabel(priority, x, y, w, h, force, draw) {
+    this._deferredLabels.push({ priority, x, y, w, h, force, draw });
+  }
+
+  _flushDeferredLabels(ctx) {
+    if (!this._deferredLabels.length) return;
+    this._deferredLabels.sort((a, b) => a.priority - b.priority);
+    ctx.save();
+    for (let i = 0; i < this._deferredLabels.length; i++) {
+      const lbl = this._deferredLabels[i];
+      if (this._tryPlaceLabel(lbl.x, lbl.y, lbl.w, lbl.h, lbl.force)) {
+        lbl.draw(ctx);
+      }
+    }
+    ctx.restore();
+  }
+
   render(rawDt) {
     const dt = Math.max(0, rawDt);
     this.time += dt;
     this.scanX = (this.scanX + dt * 0.085) % 1;
+    this._labelBoxes = [];
+    this._deferredLabels = [];
 
     // Update arc packets
     const speedMult = this.alertActive ? 1.85 : 1.0;
@@ -448,6 +741,23 @@ export class WorldMapEngine {
     // Update trace segment progress
     if (this.trace && !this.trace.finished) {
       this.trace.segProgress = Math.min(1, this.trace.segProgress + dt * 1.35);
+    }
+
+    // Smooth 2D glide interpolation (focusLonLat / resetView)
+    if (this.mode === '2d' && !this.dragging && this.target2D) {
+      const k = Math.min(1, dt * 6.0);
+      const dZoom = this.target2D.zoom - this.zoom;
+      const dPanX = this.target2D.panX - this.panX;
+      const dPanY = this.target2D.panY - this.panY;
+      this.zoom += dZoom * k;
+      this.panX += dPanX * k;
+      this.panY += dPanY * k;
+      if (Math.abs(dZoom) < 0.005 && Math.abs(dPanX) < 0.5 && Math.abs(dPanY) < 0.5) {
+        this.zoom = this.target2D.zoom;
+        this.panX = this.target2D.panX;
+        this.panY = this.target2D.panY;
+        this.target2D = null;
+      }
     }
 
     // Update 3D globe rotation
@@ -476,18 +786,8 @@ export class WorldMapEngine {
       if (this.pings[i].age >= this.pings[i].maxAge) this.pings.splice(i, 1);
     }
 
-    // Theme palette lookup
-    const accent = getCssVar('--accent', '#00e5ff');
-    const accentRgb = getCssVar('--accent-rgb', '0, 229, 255');
-    const ok = getCssVar('--ok', '#00ff9c');
-    const okRgb = getCssVar('--ok-rgb', '0, 255, 156');
-    const warn = getCssVar('--warn', '#ffb000');
-    const warnRgb = getCssVar('--warn-rgb', '255, 176, 0');
-    const crit = getCssVar('--crit', '#ff2a55');
-    const critRgb = getCssVar('--crit-rgb', '255, 42, 85');
-    const covert = getCssVar('--covert', '#b46cff');
-    const covertRgb = getCssVar('--covert-rgb', '180, 108, 255');
-    const palette = { accent, accentRgb, ok, okRgb, warn, warnRgb, crit, critRgb, covert, covertRgb };
+    // Cached theme palette lookup (zero per-frame getComputedStyle)
+    const palette = getThemePalette();
 
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.w, this.h);
@@ -495,21 +795,22 @@ export class WorldMapEngine {
     const proj = this._getProjection(false);
     const path = geoPath(proj, ctx);
 
-    // 1. Subtle background dot-grid / radar framing
-    this._drawBackdropGrid(ctx, palette);
-
-    // 2. Globe outer halo / holographic back-hemisphere pass (3D only)
-    if (this.mode === '3d') {
+    // 1-4. Base layers: cached single-blit offscreen pass in 2D, live dual-res pass in 3D
+    if (this.mode === '2d') {
+      this._render2DBaseLayer(ctx, proj, palette);
+    } else {
+      this._drawBackdropGrid(ctx, palette);
       this._drawGlobeBackPass(ctx, palette);
+      if (this.layers.grid) {
+        this._drawGraticule(ctx, path, proj, palette);
+      }
+      this._drawWorldWireframe(ctx, path, palette, this.dragging);
     }
 
-    // 3. Tactical Graticule (Lat/Lon Wireframe Grid)
-    if (this.layers.grid) {
-      this._drawGraticule(ctx, path, proj, palette);
+    // 4.5. Real-Time Solar Terminator (Day/Night hemisphere + twilight + subsolar marker)
+    if (this.layers.terminator) {
+      this._drawSolarTerminator(ctx, path, proj, palette);
     }
-
-    // 4. World Landmasses & Country Borders Wireframe
-    this._drawWorldWireframe(ctx, path, palette);
 
     // 5. Globe front atmospheric rim (3D only)
     if (this.mode === '3d') {
@@ -524,6 +825,11 @@ export class WorldMapEngine {
     // 6.5. Live NOAA Solar / Geomagnetic Aurora Ovals
     if (this.layers.solar && this.liveFeeds?.data.solar) {
       this._drawSolarAurora(ctx, path, palette);
+    }
+
+    // 6.8. Subsea Fiber Trunk Cables
+    if (this.layers.cables) {
+      this._drawSubseaCables(ctx, path, proj, palette);
     }
 
     // 7. SIGINT RF Heat / Interference Zones
@@ -543,12 +849,12 @@ export class WorldMapEngine {
 
     // 9.5. Live Public Data Overlays: Meteo, BGP IXPs, USGS Quakes, UN GDACS, NASA EONET, Wiki, ADS-B
     if (this.liveFeeds) {
-      if (this.layers.meteo) this._drawLiveMeteo(ctx, proj, palette);
+      if (this.layers.meteo) this._drawLiveMeteo(ctx, proj);
       if (this.layers.bgp) this._drawLiveBgp(ctx, proj, palette);
       if (this.layers.quakes) this._drawLiveQuakes(ctx, proj, palette);
       if (this.layers.gdacs) this._drawLiveGdacs(ctx, proj, palette);
       if (this.layers.eonet) this._drawLiveEonet(ctx, proj, palette);
-      if (this.layers.wiki) this._drawLiveWiki(ctx, proj, palette);
+      if (this.layers.wiki) this._drawLiveWiki(ctx, proj);
       if (this.layers.aircraft) this._drawLiveAircraft(ctx, proj, palette);
     }
 
@@ -568,21 +874,50 @@ export class WorldMapEngine {
       this._drawNodes(ctx, proj, palette);
     }
 
+    // 12.5. Priority-sorted de-cluttered labels
+    this._flushDeferredLabels(ctx);
+
     // 13. Live Cursor Tactical Crosshair
     if (this.mouse.inside && !this.dragging) {
       this._drawCrosshair(ctx, palette);
     }
   }
 
+  _render2DBaseLayer(ctx, proj, palette) {
+    const cacheKey = `${this.w}|${this.h}|${this.dpr}|${this.zoom.toFixed(4)}|${this.panX.toFixed(2)}|${this.panY.toFixed(2)}|${this.layers.grid}|${palette.theme}`;
+    if (!this._baseCacheCanvas) {
+      this._baseCacheCanvas = document.createElement('canvas');
+      this._baseCacheCtx = this._baseCacheCanvas.getContext('2d');
+    }
+
+    if (this._baseCacheKey !== cacheKey) {
+      const targetW = Math.round(this.w * this.dpr);
+      const targetH = Math.round(this.h * this.dpr);
+      if (this._baseCacheCanvas.width !== targetW || this._baseCacheCanvas.height !== targetH) {
+        this._baseCacheCanvas.width = targetW;
+        this._baseCacheCanvas.height = targetH;
+      }
+
+      const cctx = this._baseCacheCtx;
+      cctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      cctx.clearRect(0, 0, this.w, this.h);
+
+      const cachePath = geoPath(proj, cctx);
+      this._drawBackdropGrid(cctx, palette);
+      if (this.layers.grid) {
+        this._drawGraticule(cctx, cachePath, proj, palette);
+      }
+      this._drawWorldWireframe(cctx, cachePath, palette, false);
+      this._baseCacheKey = cacheKey;
+    }
+
+    ctx.drawImage(this._baseCacheCanvas, 0, 0, this.w, this.h);
+  }
+
   _drawBackdropGrid(ctx, { accentRgb }) {
     ctx.save();
-    ctx.fillStyle = `rgba(${accentRgb}, 0.08)`;
-    const step = 36;
-    for (let x = 18; x < this.w; x += step) {
-      for (let y = 18; y < this.h; y += step) {
-        ctx.fillRect(x, y, 1, 1);
-      }
-    }
+    ctx.fillStyle = this._ensureDotPattern(ctx, accentRgb);
+    ctx.fillRect(0, 0, this.w, this.h);
     ctx.restore();
   }
 
@@ -614,7 +949,7 @@ export class WorldMapEngine {
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.fill();
 
-    // Clip to sphere and render faint translucent BACKSIDE wireframe (holographic effect!)
+    // Clip to sphere and render faint translucent BACKSIDE wireframe (110m for 60fps 3D)
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.clip();
@@ -628,7 +963,7 @@ export class WorldMapEngine {
     }
 
     ctx.beginPath();
-    pathBack(this.land);
+    pathBack(this.land110);
     ctx.strokeStyle = `rgba(${accentRgb}, 0.14)`;
     ctx.lineWidth = 0.75;
     ctx.stroke();
@@ -718,31 +1053,183 @@ export class WorldMapEngine {
     ctx.restore();
   }
 
-  _drawWorldWireframe(ctx, path, { accent, accentRgb }) {
+  _drawWorldWireframe(ctx, path, { accent, accentRgb }, useLowRes = false) {
+    const land = useLowRes ? this.land110 : this.land50;
+    const borders = useLowRes ? this.borders110 : this.borders50;
+
     ctx.save();
 
     // 1. Landmass subtle holographic hatch fill
     ctx.beginPath();
-    path(this.land);
-    ctx.fillStyle = this._ensureHatchPattern(accentRgb);
+    path(land);
+    ctx.fillStyle = this._ensureHatchPattern(ctx, accentRgb);
     ctx.fill();
 
     // 2. Interior country borders (thin wireframe)
     ctx.beginPath();
-    path(this.borders);
+    path(borders);
     ctx.strokeStyle = `rgba(${accentRgb}, 0.34)`;
     ctx.lineWidth = 0.65;
     ctx.stroke();
 
     // 3. Outer glowing coastline wireframe
     ctx.beginPath();
-    path(this.land);
+    path(land);
     ctx.strokeStyle = accent;
     ctx.lineWidth = 1.25;
     ctx.shadowColor = accent;
     ctx.shadowBlur = 8;
     ctx.stroke();
 
+    ctx.restore();
+  }
+
+  _getSolarTerminatorCache() {
+    const now = Date.now();
+    if (this._terminatorCache && now - this._terminatorCache.ts < 10000) {
+      return this._terminatorCache;
+    }
+    const d = new Date(now);
+    const sun = getSubsolarPoint(d);
+    const nightCenter = getNightCircleCenter(d);
+    const nightPoly = geoCircle().center(nightCenter).radius(90).precision(3)();
+    const twilightPoly = geoCircle().center(nightCenter).radius(84).precision(3)();
+    this._terminatorCache = {
+      ts: now,
+      sun,
+      nightCenter,
+      nightPoly,
+      twilightPoly,
+    };
+    return this._terminatorCache;
+  }
+
+  _drawSolarTerminator(ctx, path, proj, palette) {
+    const { sun, nightPoly, twilightPoly } = this._getSolarTerminatorCache();
+    const horizonRgb = palette.secondaryRgb || palette.accentRgb;
+
+    ctx.save();
+
+    // Night hemisphere shadow polygon + crisp horizon curve at radius(90)
+    ctx.beginPath();
+    path(nightPoly);
+    ctx.fillStyle = 'rgba(1, 5, 14, 0.42)';
+    ctx.fill();
+    ctx.strokeStyle = `rgba(${horizonRgb}, 0.28)`;
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    // Subtle civil twilight contour at radius(84)
+    ctx.beginPath();
+    path(twilightPoly);
+    ctx.strokeStyle = `rgba(${palette.accentRgb}, 0.14)`;
+    ctx.lineWidth = 0.9;
+    ctx.setLineDash([4, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Glowing golden subsolar marker when visible
+    if (this._isVisible3D(sun.lon, sun.lat)) {
+      const spt = proj([sun.lon, sun.lat]);
+      if (spt) {
+        ctx.save();
+        ctx.translate(spt[0], spt[1]);
+
+        const glow = ctx.createRadialGradient(0, 0, 1, 0, 0, 14);
+        glow.addColorStop(0, 'rgba(255, 224, 102, 0.45)');
+        glow.addColorStop(0.5, 'rgba(255, 224, 102, 0.12)');
+        glow.addColorStop(1, 'rgba(255, 224, 102, 0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(0, 0, 14, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 8 golden rays
+        ctx.strokeStyle = 'rgba(255, 224, 102, 0.78)';
+        ctx.lineWidth = 0.95;
+        for (let i = 0; i < 8; i++) {
+          const a = (i * Math.PI) / 4;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a) * 4.5, Math.sin(a) * 4.5);
+          ctx.lineTo(Math.cos(a) * 8.2, Math.sin(a) * 8.2);
+          ctx.stroke();
+        }
+
+        // Core sun disc
+        ctx.fillStyle = '#ffe066';
+        ctx.shadowColor = '#ffe066';
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.arc(0, 0, 3.0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  _drawSubseaCables(ctx, path, proj, palette) {
+    const cableRgb = palette.secondaryRgb || '79, 168, 255';
+    const cableColor = palette.secondary || palette.accent;
+
+    ctx.save();
+    for (let i = 0; i < this._cableGeoms.length; i++) {
+      const { cable, geoLine } = this._cableGeoms[i];
+      const isSelected = this.selectedLive?.kind === 'cable' && this.selectedLive.id === cable.id;
+      const isHovered = this.hoveredItem?.kind === 'cable' && this.hoveredItem.item.id === cable.id;
+      const active = isSelected || isHovered;
+
+      ctx.save();
+      ctx.beginPath();
+      path(geoLine);
+      if (active) {
+        ctx.strokeStyle = isSelected ? '#ffffff' : palette.accent;
+        ctx.lineWidth = isSelected ? 2.1 : 1.8;
+        ctx.shadowColor = palette.accent;
+        ctx.shadowBlur = 9;
+      } else {
+        ctx.strokeStyle = `rgba(${cableRgb}, 0.34)`;
+        ctx.lineWidth = 1.1;
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // Tiny 1.6px landing-station endpoint dots
+      const coords = cable.coordinates;
+      const startCoord = coords[0];
+      const endCoord = coords[coords.length - 1];
+      ctx.fillStyle = active ? '#ffffff' : `rgba(${cableRgb}, 0.62)`;
+      for (const ep of [startCoord, endCoord]) {
+        if (!ep || !this._isVisible3D(ep[0], ep[1])) continue;
+        const ept = proj(ep);
+        if (!ept) continue;
+        ctx.beginPath();
+        ctx.arc(ept[0], ept[1], active ? 2.2 : 1.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (active && this._isVisible3D(cable.lon, cable.lat)) {
+        const mpt = proj([cable.lon, cable.lat]);
+        if (mpt) {
+          if (isSelected) {
+            this._drawReticle(ctx, mpt[0], mpt[1], cableColor, 15);
+          }
+          const tag = `${cable.code} ${cable.name}`;
+          ctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+          const tw = ctx.measureText(tag).width;
+          const lx = mpt[0] + 10;
+          const ly = mpt[1] - 6;
+          this._queueLabel(0, lx - 2, ly - 9, tw + 4, 11, true, (lctx) => {
+            lctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+            lctx.fillStyle = 'rgba(3, 9, 17, 0.84)';
+            lctx.fillRect(lx - 2, ly - 9, tw + 4, 11);
+            lctx.fillStyle = isSelected ? '#ffffff' : palette.accent;
+            lctx.fillText(tag, lx, ly);
+          });
+        }
+      }
+    }
     ctx.restore();
   }
 
@@ -893,17 +1380,31 @@ export class WorldMapEngine {
   }
 
   _drawTraceOverlay(ctx, proj, { crit, ok }) {
-    const ids = this.trace.nodeIds;
+    const wps = this.trace.waypoints || [];
+    if (wps.length < 2) return;
     const beamColor = this.trace.finished ? ok : crit;
 
     ctx.save();
     ctx.shadowColor = beamColor;
     ctx.shadowBlur = 12;
 
-    const maxSeg = Math.min(this.trace.activeStep, ids.length - 1);
+    // Origin hop ring
+    const origin = wps[0];
+    if (origin && this._isVisible3D(origin.lon, origin.lat)) {
+      const p0 = proj([origin.lon, origin.lat]);
+      if (p0) {
+        ctx.strokeStyle = beamColor;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(p0[0], p0[1], 7, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    const maxSeg = Math.min(this.trace.activeStep, wps.length - 1);
     for (let s = 0; s < maxSeg; s++) {
-      const a = this.nodeById.get(ids[s]);
-      const b = this.nodeById.get(ids[s + 1]);
+      const a = wps[s];
+      const b = wps[s + 1];
       if (!a || !b) continue;
       const interp = geoInterpolate([a.lon, a.lat], [b.lon, b.lat]);
       const isCurrent = s === maxSeg - 1 && !this.trace.finished;
@@ -942,11 +1443,12 @@ export class WorldMapEngine {
     ctx.restore();
   }
 
-  _drawSatellites(ctx, proj, path, { ok, okRgb, accentRgb }) {
+  _drawSatellites(ctx, proj, path, { ok, okRgb }) {
     ctx.save();
 
     for (const s of this.satellites) {
       const isSelected = this.selectedSatId === s.id;
+      const isHovered = this.hoveredItem?.kind === 'sat' && this.hoveredItem.item.id === s.id;
 
       // 1. Orbital sinusoidal ground track
       ctx.beginPath();
@@ -1030,13 +1532,19 @@ export class WorldMapEngine {
       ctx.lineTo(-3.5, 0);
       ctx.closePath();
       ctx.fill();
-
-      // Label
-      ctx.shadowBlur = 0;
-      ctx.font = '8px "SF Mono", Menlo, monospace';
-      ctx.fillStyle = isSelected ? '#ffffff' : `rgba(${okRgb}, 0.85)`;
-      ctx.fillText(s.name.split(' ')[0], 13, 3);
       ctx.restore();
+
+      const tag = s.name.split(' ')[0];
+      ctx.font = '8px "SF Mono", Menlo, monospace';
+      const tw = ctx.measureText(tag).width;
+      const lx = pt[0] + 13;
+      const ly = pt[1] + 3;
+      const force = isSelected || isHovered;
+      this._queueLabel(force ? 0 : 2, lx - 2, ly - 8, tw + 4, 10, force, (lctx) => {
+        lctx.font = '8px "SF Mono", Menlo, monospace';
+        lctx.fillStyle = force ? '#ffffff' : `rgba(${okRgb}, 0.85)`;
+        lctx.fillText(tag, lx, ly);
+      });
 
       if (isSelected) {
         this._drawReticle(ctx, pt[0], pt[1], ok, 18);
@@ -1054,7 +1562,7 @@ export class WorldMapEngine {
       if (!pt) continue;
       const frac = p.age / p.maxAge;
       const radius = 6 + frac * 48;
-      const color = getCssVar(p.colorVar, palette.accent);
+      const color = getCachedCssVar(p.colorVar, palette.accent);
       ctx.strokeStyle = color;
       ctx.globalAlpha = (1 - frac) * 0.9;
       ctx.lineWidth = 1.6;
@@ -1122,8 +1630,9 @@ export class WorldMapEngine {
       ctx.fill();
       ctx.restore();
 
-      // Callout tag with smart directional anchor so dense regions never collide
-      ctx.font = isSelected || isHovered ? 'bold 9.5px "SF Mono", Menlo, monospace' : '8.5px "SF Mono", Menlo, monospace';
+      // Callout tag with smart directional anchor + collision culling
+      const font = isSelected || isHovered ? 'bold 9.5px "SF Mono", Menlo, monospace' : '8.5px "SF Mono", Menlo, monospace';
+      ctx.font = font;
       const label = `${n.code} ${n.city}`;
       const tw = ctx.measureText(label).width;
       const pos = n.labelPos || 'tr';
@@ -1131,23 +1640,24 @@ export class WorldMapEngine {
       const isBottom = pos === 'bl' || pos === 'br';
       const lx = isLeft ? pt[0] - 10 - tw : pt[0] + 10;
       const ly = isBottom ? pt[1] + 14 : pt[1] - 7;
+      const force = isSelected || isHovered || n.type === 'CRITICAL';
+      const drawLeader = isSelected || n.type === 'CRITICAL' || isHovered || pos !== 'tr';
 
-      // Subtle leader tick for selected/critical/hovered or offset labels
-      if (isSelected || n.type === 'CRITICAL' || isHovered || pos !== 'tr') {
-        ctx.strokeStyle = `rgba(${rgb}, 0.65)`;
-        ctx.lineWidth = 0.8;
-        ctx.beginPath();
-        ctx.moveTo(pt[0] + (isLeft ? -4 : 4), pt[1] + (isBottom ? 3 : -2));
-        ctx.lineTo(isLeft ? lx + tw + 2 : lx - 2, ly - 3);
-        ctx.stroke();
-      }
-
-      // Label backdrop for legibility
-      ctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
-      ctx.fillRect(lx - 2, ly - 9, tw + 4, 11);
-
-      ctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
-      ctx.fillText(label, lx, ly);
+      this._queueLabel(force ? 0 : 1, lx - 2, ly - 9, tw + 4, 11, force, (lctx) => {
+        if (drawLeader) {
+          lctx.strokeStyle = `rgba(${rgb}, 0.65)`;
+          lctx.lineWidth = 0.8;
+          lctx.beginPath();
+          lctx.moveTo(pt[0] + (isLeft ? -4 : 4), pt[1] + (isBottom ? 3 : -2));
+          lctx.lineTo(isLeft ? lx + tw + 2 : lx - 2, ly - 3);
+          lctx.stroke();
+        }
+        lctx.font = font;
+        lctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+        lctx.fillRect(lx - 2, ly - 9, tw + 4, 11);
+        lctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
+        lctx.fillText(label, lx, ly);
+      });
 
       // Animated Target Lock Reticle around selected node
       if (isSelected) {
@@ -1212,12 +1722,21 @@ export class WorldMapEngine {
     const pulse = 0.78 + 0.22 * Math.sin(this.time * 1.8);
     const rgb = kp >= 5 ? critRgb : kp >= 4 ? warnRgb : okRgb;
 
-    ctx.save();
-    for (const poleLat of [81, -76]) {
-      const poleLon = poleLat > 0 ? -72 : 108; // approximate geomagnetic poles
-      const outer = geoCircle().center([poleLon, poleLat]).radius(radiusDeg)();
-      const inner = geoCircle().center([poleLon, poleLat]).radius(Math.max(6, radiusDeg - 5))();
+    if (!this._auroraCache || this._auroraCache.radiusDeg !== radiusDeg) {
+      this._auroraCache = {
+        radiusDeg,
+        ovals: [81, -76].map((poleLat) => {
+          const poleLon = poleLat > 0 ? -72 : 108;
+          return {
+            outer: geoCircle().center([poleLon, poleLat]).radius(radiusDeg)(),
+            inner: geoCircle().center([poleLon, poleLat]).radius(Math.max(6, radiusDeg - 5))(),
+          };
+        }),
+      };
+    }
 
+    ctx.save();
+    for (const { outer, inner } of this._auroraCache.ovals) {
       ctx.beginPath();
       path(outer);
       ctx.fillStyle = `rgba(${rgb}, ${(0.055 * pulse).toFixed(3)})`;
@@ -1280,14 +1799,19 @@ export class WorldMapEngine {
       ctx.arc(pt[0], pt[1], Math.max(1.8, isMajor ? 3.2 : 2.1), 0, Math.PI * 2);
       ctx.fill();
 
-      // Magnitude callout for M4.5+ or selected/hovered
+      // Magnitude callout for M4.6+ or selected/hovered
       if (q.mag >= 4.6 || isSelected || isHovered) {
-        ctx.font = 'bold 8px "SF Mono", Menlo, monospace';
         const tag = `M${q.mag.toFixed(1)}`;
-        ctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
-        ctx.fillRect(pt[0] + 5, pt[1] - 9, 25, 10);
-        ctx.fillStyle = color;
-        ctx.fillText(tag, pt[0] + 7, pt[1] - 1);
+        const lx = pt[0] + 5;
+        const ly = pt[1] - 9;
+        const force = isMajor || isSelected || isHovered;
+        this._queueLabel(force ? 0 : 2, lx, ly, 25, 10, force, (lctx) => {
+          lctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+          lctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+          lctx.fillRect(lx, ly, 25, 10);
+          lctx.fillStyle = color;
+          lctx.fillText(tag, lx + 2, ly + 8);
+        });
       }
 
       if (isSelected) {
@@ -1364,19 +1888,64 @@ export class WorldMapEngine {
     ctx.restore();
   }
 
-  _drawLiveAircraft(ctx, proj, { accent, crit }) {
+  _drawLiveAircraft(ctx, proj, { accent, crit, critRgb }) {
     const planes = this.liveFeeds.data.aircraft;
     if (!planes.length) return;
 
     ctx.save();
     for (const ac of planes) {
+      const isSelected = this.selectedLive?.kind === 'aircraft' && this.selectedLive.id === ac.id;
+      const isHovered = this.hoveredItem?.kind === 'aircraft' && this.hoveredItem.item.id === ac.id;
+
+      // Altitude color coding for non-emergency flights
+      const altColor =
+        ac.altFt >= 30000 ? '#9be8ff' : ac.altFt >= 15000 ? '#5ce1ff' : '#4dffb8';
+      const altRgb =
+        ac.altFt >= 30000 ? '155, 232, 255' : ac.altFt >= 15000 ? '92, 225, 255' : '77, 255, 184';
+      const wakeRgb = ac.emergency ? critRgb : altRgb;
+      const color = ac.emergency ? crit : isSelected || isHovered ? '#ffffff' : altColor;
+
+      // Crisp fading ADS-B breadcrumb wake polyline connected to current position
+      if (Array.isArray(ac.trail) && ac.trail.length > 0) {
+        const wakeCoords = ac.trail.slice();
+        const last = wakeCoords[wakeCoords.length - 1];
+        if (!last || Math.hypot(ac.lon - last[0], ac.lat - last[1]) > 0.001) {
+          wakeCoords.push([ac.lon, ac.lat]);
+        }
+        const total = wakeCoords.length;
+        if (total > 1) {
+          let prevPt = null;
+          const maxAlpha = isSelected || isHovered ? 0.85 : ac.emergency ? 0.72 : 0.48;
+          ctx.lineWidth = isSelected || isHovered ? 1.5 : 1.0;
+          for (let i = 0; i < total; i++) {
+            const [lon, lat] = wakeCoords[i];
+            if (!this._isVisible3D(lon, lat)) {
+              prevPt = null;
+              continue;
+            }
+            const p = proj([lon, lat]);
+            if (!p) {
+              prevPt = null;
+              continue;
+            }
+            if (prevPt && Math.abs(p[0] - prevPt[0]) <= this.w * 0.35) {
+              const frac = i / (total - 1);
+              const alpha = 0.06 + frac * maxAlpha;
+              ctx.strokeStyle = `rgba(${wakeRgb}, ${alpha.toFixed(2)})`;
+              ctx.beginPath();
+              ctx.moveTo(prevPt[0], prevPt[1]);
+              ctx.lineTo(p[0], p[1]);
+              ctx.stroke();
+            }
+            prevPt = p;
+          }
+        }
+      }
+
       if (!this._isVisible3D(ac.lon, ac.lat)) continue;
       const pt = proj([ac.lon, ac.lat]);
       if (!pt) continue;
 
-      const isSelected = this.selectedLive?.kind === 'aircraft' && this.selectedLive.id === ac.id;
-      const isHovered = this.hoveredItem?.kind === 'aircraft' && this.hoveredItem.item.id === ac.id;
-      const color = ac.emergency ? crit : isSelected || isHovered ? '#ffffff' : '#7df9ff';
       const headingRad = ((ac.trackDeg ?? 0) * Math.PI) / 180;
 
       ctx.save();
@@ -1384,7 +1953,7 @@ export class WorldMapEngine {
       ctx.rotate(headingRad);
 
       // Subtle velocity heading vector line ahead of aircraft
-      ctx.strokeStyle = ac.emergency ? 'rgba(255, 42, 85, 0.7)' : 'rgba(125, 249, 255, 0.45)';
+      ctx.strokeStyle = `rgba(${wakeRgb}, ${ac.emergency ? 0.75 : 0.48})`;
       ctx.lineWidth = 0.85;
       ctx.beginPath();
       ctx.moveTo(0, -4);
@@ -1408,14 +1977,19 @@ export class WorldMapEngine {
         ctx.font = 'bold 8px "SF Mono", Menlo, monospace';
         const tag = `${ac.callsign} ${ac.type}`;
         const tw = ctx.measureText(tag).width;
-        ctx.fillStyle = 'rgba(3, 9, 17, 0.82)';
-        ctx.fillRect(pt[0] + 7, pt[1] - 9, tw + 4, 10);
-        ctx.fillStyle = ac.emergency ? crit : accent;
-        ctx.fillText(tag, pt[0] + 9, pt[1] - 1);
+        const lx = pt[0] + 7;
+        const ly = pt[1] - 9;
+        this._queueLabel(0, lx, ly, tw + 4, 10, true, (lctx) => {
+          lctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+          lctx.fillStyle = 'rgba(3, 9, 17, 0.82)';
+          lctx.fillRect(lx, ly, tw + 4, 10);
+          lctx.fillStyle = ac.emergency ? crit : accent;
+          lctx.fillText(tag, lx + 2, ly + 8);
+        });
       }
 
       if (isSelected) {
-        this._drawReticle(ctx, pt[0], pt[1], ac.emergency ? crit : accent, 15);
+        this._drawReticle(ctx, pt[0], pt[1], ac.emergency ? crit : altColor, 15);
       }
     }
     ctx.restore();
@@ -1488,16 +2062,22 @@ export class WorldMapEngine {
       ctx.beginPath();
       ctx.arc(0, 0, isIss ? 3.2 : 2.5, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
 
-      ctx.shadowBlur = 0;
-      ctx.font = isIss || isSelected ? 'bold 8.5px "SF Mono", Menlo, monospace' : '8px "SF Mono", Menlo, monospace';
+      const font = isIss || isSelected ? 'bold 8.5px "SF Mono", Menlo, monospace' : '8px "SF Mono", Menlo, monospace';
+      ctx.font = font;
       const shortName = isIss ? 'ISS [LIVE]' : s.name.replace(/\s*\(.*?\)/, '');
       const tw = ctx.measureText(shortName).width;
-      ctx.fillStyle = 'rgba(3, 9, 17, 0.76)';
-      ctx.fillRect(12, -7, tw + 4, 10);
-      ctx.fillStyle = isSelected ? '#ffffff' : satColor;
-      ctx.fillText(shortName, 14, 1);
-      ctx.restore();
+      const lx = pt[0] + 12;
+      const ly = pt[1] - 7;
+      const force = isIss || isSelected || isHovered;
+      this._queueLabel(force ? 0 : 2, lx, ly, tw + 4, 10, force, (lctx) => {
+        lctx.font = font;
+        lctx.fillStyle = 'rgba(3, 9, 17, 0.76)';
+        lctx.fillRect(lx, ly, tw + 4, 10);
+        lctx.fillStyle = isSelected || isHovered ? '#ffffff' : satColor;
+        lctx.fillText(shortName, lx + 2, ly + 8);
+      });
 
       if (isSelected) {
         this._drawReticle(ctx, pt[0], pt[1], isIss ? warn : ok, 18);
@@ -1543,13 +2123,18 @@ export class WorldMapEngine {
       ctx.fill();
       ctx.restore();
 
-      // Compact temp tag
-      ctx.font = '7.5px "SF Mono", Menlo, monospace';
+      // Compact temp tag (collision-culled at low zoom unless selected/hovered)
       const label = `${Math.round(st.tempC)}°C`;
-      ctx.fillStyle = 'rgba(3, 9, 17, 0.72)';
-      ctx.fillRect(pt[0] + 5, pt[1] + 2, 23, 9.5);
-      ctx.fillStyle = isSelected || isHovered ? '#ffffff' : 'rgba(130, 224, 255, 0.88)';
-      ctx.fillText(label, pt[0] + 6, pt[1] + 9.5);
+      const lx = pt[0] + 5;
+      const ly = pt[1] + 2;
+      const force = isSelected || isHovered;
+      this._queueLabel(force ? 0 : 3, lx, ly, 23, 9.5, force, (lctx) => {
+        lctx.font = '7.5px "SF Mono", Menlo, monospace';
+        lctx.fillStyle = 'rgba(3, 9, 17, 0.72)';
+        lctx.fillRect(lx, ly, 23, 9.5);
+        lctx.fillStyle = force ? '#ffffff' : 'rgba(130, 224, 255, 0.88)';
+        lctx.fillText(label, lx + 1, ly + 7.5);
+      });
 
       if (isSelected) {
         this._drawReticle(ctx, pt[0], pt[1], color, 15);
@@ -1558,12 +2143,90 @@ export class WorldMapEngine {
     ctx.restore();
   }
 
-  _drawLiveBgp(ctx, proj, { covert, covertRgb }) {
-    const cols = this.liveFeeds.data.bgpCollectors;
-    if (!cols.length) return;
+  _drawLiveBgp(ctx, proj, { covert, covertRgb, warn, warnRgb, crit, critRgb }) {
+    const cols = this.liveFeeds.data.bgpCollectors || [];
+    const pulses = this.liveFeeds.data.bgpPulses || [];
+    if (!cols.length && !pulses.length) return;
     const now = Date.now();
 
     ctx.save();
+
+    // 1. Live ephemeral BGP geodesic pulse arcs (announcements = covert violet, withdrawals = amber/crit)
+    for (let i = 0; i < pulses.length; i++) {
+      const p = pulses[i];
+      const age = now - p.ts;
+      if (age < 0 || age >= 4200) continue;
+      if (!Number.isFinite(p.lon) || !Number.isFinite(p.lat) || !Number.isFinite(p.toLon) || !Number.isFinite(p.toLat)) {
+        continue;
+      }
+
+      const frac = age / 4200;
+      const fade = 1 - frac;
+      const arcColor = p.isWithdraw ? warn : covert;
+      const arcRgb = p.isWithdraw ? warnRgb : covertRgb;
+      const headGlowColor = p.isWithdraw ? crit : covert;
+
+      if (!p._interp) {
+        p._interp = geoInterpolate([p.lon, p.lat], [p.toLon, p.toLat]);
+      }
+
+      const segments = this._sampleGeodesicScreenPoints(p._interp, proj, 22);
+      ctx.strokeStyle = `rgba(${arcRgb}, ${(fade * (p.isWithdraw ? 0.62 : 0.48)).toFixed(2)})`;
+      ctx.lineWidth = p.isWithdraw ? 1.35 : 1.05;
+      for (const seg of segments) {
+        ctx.beginPath();
+        for (let j = 0; j < seg.length; j++) {
+          if (j === 0) ctx.moveTo(seg[j][0], seg[j][1]);
+          else ctx.lineTo(seg[j][0], seg[j][1]);
+        }
+        ctx.stroke();
+      }
+
+      // Luminous moving BGP packet head + short trailing wake along frac
+      const tailLen = 0.16;
+      const tailSteps = 6;
+      const tailPts = [];
+      for (let s = 0; s <= tailSteps; s++) {
+        const t = Math.max(0, frac - tailLen * (1 - s / tailSteps));
+        const [lon, lat] = p._interp(t);
+        if (!this._isVisible3D(lon, lat)) continue;
+        const pt = proj([lon, lat]);
+        if (pt) tailPts.push(pt);
+      }
+
+      if (tailPts.length > 1) {
+        ctx.lineWidth = p.isWithdraw ? 2.0 : 1.7;
+        for (let s = 1; s < tailPts.length; s++) {
+          const p0 = tailPts[s - 1];
+          const p1 = tailPts[s];
+          if (Math.abs(p1[0] - p0[0]) > this.w * 0.4) continue;
+          const a = (s / tailPts.length) * fade * 0.95;
+          ctx.strokeStyle = `rgba(${p.isWithdraw ? critRgb : arcRgb}, ${a.toFixed(2)})`;
+          ctx.beginPath();
+          ctx.moveTo(p0[0], p0[1]);
+          ctx.lineTo(p1[0], p1[1]);
+          ctx.stroke();
+        }
+      }
+
+      const [hlon, hlat] = p._interp(frac);
+      if (this._isVisible3D(hlon, hlat)) {
+        const hpt = proj([hlon, hlat]);
+        if (hpt) {
+          ctx.save();
+          ctx.globalAlpha = Math.min(1, fade * 1.4);
+          ctx.fillStyle = p.isWithdraw ? arcColor : '#ffffff';
+          ctx.shadowColor = headGlowColor;
+          ctx.shadowBlur = 8;
+          ctx.beginPath();
+          ctx.arc(hpt[0], hpt[1], p.isWithdraw ? 2.3 : 1.9, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    }
+
+    // 2. RIPE RIS IXP collector hex markers + local pulse rings
     for (const c of cols) {
       if (!this._isVisible3D(c.lon, c.lat)) continue;
       const pt = proj([c.lon, c.lat]);
@@ -1657,14 +2320,20 @@ export class WorldMapEngine {
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
-
-      // Tiny event type code inside/beside for Red/Orange/selected
-      if (isRed || isOrange || isSelected || isHovered) {
-        ctx.font = 'bold 7.5px "SF Mono", Menlo, monospace';
-        ctx.fillStyle = color;
-        ctx.fillText(ev.eventType, 7, 2.5);
-      }
       ctx.restore();
+
+      // Tiny event type code beside for Red/Orange/selected/hovered
+      if (isRed || isOrange || isSelected || isHovered) {
+        const tag = ev.eventType || 'ALT';
+        const lx = pt[0] + 7;
+        const ly = pt[1] + 2.5;
+        const force = isRed || isSelected || isHovered;
+        this._queueLabel(force ? 0 : 2, lx - 1, ly - 8, 18, 10, force, (lctx) => {
+          lctx.font = 'bold 7.5px "SF Mono", Menlo, monospace';
+          lctx.fillStyle = color;
+          lctx.fillText(tag, lx, ly);
+        });
+      }
 
       if (isSelected) {
         this._drawReticle(ctx, pt[0], pt[1], color, 16);
@@ -1685,6 +2354,7 @@ export class WorldMapEngine {
       if (!pt) continue;
 
       const isSelected = this.selectedLive?.kind === 'wiki' && this.selectedLive.id === h.id;
+      const isHovered = this.hoveredItem?.kind === 'wiki' && this.hoveredItem.item.id === h.id;
       const age = now - h.lastPulseAt;
       if (h.lastPulseAt > 0 && age < 2600) {
         const frac = age / 2600;
@@ -1698,9 +2368,15 @@ export class WorldMapEngine {
       ctx.strokeStyle = 'rgba(210, 242, 255, 0.75)';
       ctx.lineWidth = 1;
       ctx.strokeRect(pt[0] - 4, pt[1] - 4, 8, 8);
-      ctx.font = 'bold 7px "SF Mono", Menlo, monospace';
-      ctx.fillStyle = '#e8f9ff';
-      ctx.fillText(h.lang, pt[0] - 4.5, pt[1] - 6);
+
+      const lx = pt[0] - 4.5;
+      const ly = pt[1] - 6;
+      const force = isSelected || isHovered;
+      this._queueLabel(force ? 0 : 3, lx - 1, ly - 7, 14, 9, force, (lctx) => {
+        lctx.font = 'bold 7px "SF Mono", Menlo, monospace';
+        lctx.fillStyle = '#e8f9ff';
+        lctx.fillText(h.lang, lx, ly);
+      });
 
       if (isSelected) {
         this._drawReticle(ctx, pt[0], pt[1], '#e8f9ff', 15);

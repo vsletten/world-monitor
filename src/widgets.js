@@ -2,9 +2,7 @@
 // AEGIS // SECONDARY TACTICAL CANVAS WIDGETS (RADAR, RF SPECTRUM, SPARKLINE)
 // ============================================================================
 
-function getCssVar(name, fallback = '#00e5ff') {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
-}
+import { getThemePalette, getCachedCssVar } from './utils.js';
 
 export class RadarWidget {
   constructor(canvas) {
@@ -14,6 +12,7 @@ export class RadarWidget {
     this.blips = this._generateBlips(7);
     this.modeColorVar = '--accent';
     this.pingPulse = 0;
+    this._dpr = 0;
     this._setupHiDPI();
   }
 
@@ -21,11 +20,18 @@ export class RadarWidget {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = 106;
     const h = 106;
+    this._dpr = dpr;
     this.canvas.width = w * dpr;
     this.canvas.height = h * dpr;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.w = w;
     this.h = h;
+  }
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (dpr === this._dpr) return;
+    this._setupHiDPI();
   }
 
   _generateBlips(count) {
@@ -65,9 +71,8 @@ export class RadarWidget {
     const cy = h / 2;
     const maxR = Math.min(w, h) / 2 - 5;
 
-    const accent = getCssVar('--accent');
-    const accentRgb = getCssVar('--accent-rgb', '0, 229, 255');
-    const modeColor = getCssVar(this.modeColorVar, accent);
+    const { accent, accentRgb } = getThemePalette();
+    const modeColor = getCachedCssVar(this.modeColorVar, accent);
 
     ctx.clearRect(0, 0, w, h);
 
@@ -188,7 +193,8 @@ export class SpectrumWidget {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = Math.max(120, Math.floor(rect.width - 8));
     const h = Math.max(64, Math.floor(rect.height - 8));
-    if (w === this.w && h === this.h) return;
+    if (w === this.w && h === this.h && dpr === this._dpr) return;
+    this._dpr = dpr;
     this.w = w;
     this.h = h;
     this.canvas.width = w * dpr;
@@ -214,18 +220,7 @@ export class SpectrumWidget {
     this.time += dt;
     this.intensityBoost = Math.max(0, this.intensityBoost - dt * 0.55);
 
-    const palette = {
-      accent: getCssVar('--accent'),
-      accentRgb: getCssVar('--accent-rgb', '0, 229, 255'),
-      ok: getCssVar('--ok', '#00ff9c'),
-      okRgb: getCssVar('--ok-rgb', '0, 255, 156'),
-      warn: getCssVar('--warn', '#ffb000'),
-      warnRgb: getCssVar('--warn-rgb', '255, 176, 0'),
-      crit: getCssVar('--crit', '#ff2a55'),
-      critRgb: getCssVar('--crit-rgb', '255, 42, 85'),
-      covert: getCssVar('--covert', '#b46cff'),
-      covertRgb: getCssVar('--covert-rgb', '180, 108, 255'),
-    };
+    const palette = getThemePalette();
 
     ctx.clearRect(0, 0, w, h);
 
@@ -609,12 +604,25 @@ export class SparklineWidget {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.values = Array.from({ length: 28 }, () => 0.28 + Math.random() * 0.22);
+    this._dpr = 0;
+    this._setupHiDPI();
+  }
+
+  _setupHiDPI() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this._dpr = dpr;
     this.w = 84;
     this.h = 20;
     this.canvas.width = this.w * dpr;
     this.canvas.height = this.h * dpr;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (dpr === this._dpr) return;
+    this._setupHiDPI();
+    this.draw();
   }
 
   push(val) {
@@ -627,9 +635,7 @@ export class SparklineWidget {
     const ctx = this.ctx;
     const w = this.w;
     const h = this.h;
-    const accent = getCssVar('--accent');
-    const accentRgb = getCssVar('--accent-rgb', '0, 229, 255');
-    const crit = getCssVar('--crit', '#ff2a55');
+    const { accent, accentRgb, crit, critRgb } = getThemePalette();
 
     ctx.clearRect(0, 0, w, h);
 
@@ -651,7 +657,7 @@ export class SparklineWidget {
     ctx.lineTo(w, h);
     ctx.lineTo(0, h);
     ctx.closePath();
-    ctx.fillStyle = hot ? 'rgba(255, 42, 85, 0.2)' : `rgba(${accentRgb}, 0.16)`;
+    ctx.fillStyle = hot ? `rgba(${critRgb}, 0.2)` : `rgba(${accentRgb}, 0.16)`;
     ctx.fill();
   }
 }

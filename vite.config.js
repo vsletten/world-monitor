@@ -1,4 +1,34 @@
+import dns from 'node:dns';
+import https from 'node:https';
 import { defineConfig } from 'vite';
+
+// Prefer IPv4 A records on dual-stack hosts (e.g. api.open-meteo.com) where IPv6 blackholes in Node TLSWrap
+dns.setDefaultResultOrder('ipv4first');
+
+const ipv4HttpsAgent = new https.Agent({
+  keepAlive: true,
+  family: 4,
+  timeout: 12000,
+});
+
+function makeHttpProxy(prefix, target) {
+  return {
+    target,
+    changeOrigin: true,
+    agent: ipv4HttpsAgent,
+    timeout: 12000,
+    proxyTimeout: 12000,
+    rewrite: (p) => p.replace(new RegExp('^/live-api/' + prefix), ''),
+    configure: (proxy) => {
+      proxy.on('error', (err, _req, res) => {
+        if (res && typeof res.writeHead === 'function' && !res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.code || 'PROXY_ERROR' }));
+        }
+      });
+    },
+  };
+}
 
 // Skip unused experimental WASM/pthreads bundle re-exported by satellite.js v7
 const skipUnusedSatelliteWasm = {
@@ -13,6 +43,37 @@ const skipUnusedSatelliteWasm = {
   load(id) {
     if (id === '\0empty-satellite-wasm') return 'export {};';
     return null;
+  },
+};
+
+const LIVE_PROXY = {
+  '/live-api/usgs': makeHttpProxy('usgs', 'https://earthquake.usgs.gov'),
+  '/live-api/eonet': makeHttpProxy('eonet', 'https://eonet.gsfc.nasa.gov'),
+  '/live-api/iss': makeHttpProxy('iss', 'https://api.wheretheiss.at'),
+  '/live-api/celestrak': makeHttpProxy('celestrak', 'https://celestrak.org'),
+  '/live-api/adsb': makeHttpProxy('adsb', 'https://api.adsb.lol'),
+  '/live-api/noaa': makeHttpProxy('noaa', 'https://services.swpc.noaa.gov'),
+  '/live-api/gdacs': makeHttpProxy('gdacs', 'https://www.gdacs.org'),
+  '/live-api/meteo': makeHttpProxy('meteo', 'https://api.open-meteo.com'),
+  '/live-api/wiki-en': makeHttpProxy('wiki-en', 'https://en.wikipedia.org'),
+  '/live-api/wiki-de': makeHttpProxy('wiki-de', 'https://de.wikipedia.org'),
+  '/live-api/wiki-ja': makeHttpProxy('wiki-ja', 'https://ja.wikipedia.org'),
+  '/live-api/wiki-fr': makeHttpProxy('wiki-fr', 'https://fr.wikipedia.org'),
+  '/live-ws/ripe': {
+    target: 'wss://ris-live.ripe.net',
+    ws: true,
+    changeOrigin: true,
+    agent: ipv4HttpsAgent,
+    rewrite: (p) => p.replace(/^\/live-ws\/ripe/, ''),
+    configure: (proxy) => {
+      proxy.on('error', () => {});
+      proxy.on('proxyReqWs', (_proxyReq, _req, socket) => {
+        socket.on('error', () => {});
+      });
+      proxy.on('open', (proxySocket) => {
+        proxySocket.on('error', () => {});
+      });
+    },
   },
 };
 
@@ -31,73 +92,12 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 4173,
     strictPort: true,
-    proxy: {
-      '/live-api/usgs': {
-        target: 'https://earthquake.usgs.gov',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/usgs/, ''),
-      },
-      '/live-api/eonet': {
-        target: 'https://eonet.gsfc.nasa.gov',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/eonet/, ''),
-      },
-      '/live-api/iss': {
-        target: 'https://api.wheretheiss.at',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/iss/, ''),
-      },
-      '/live-api/celestrak': {
-        target: 'https://celestrak.org',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/celestrak/, ''),
-      },
-      '/live-api/adsb': {
-        target: 'https://api.adsb.lol',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/adsb/, ''),
-      },
-      '/live-api/noaa': {
-        target: 'https://services.swpc.noaa.gov',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/noaa/, ''),
-      },
-      '/live-api/gdacs': {
-        target: 'https://www.gdacs.org',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/gdacs/, ''),
-      },
-      '/live-api/meteo': {
-        target: 'https://api.open-meteo.com',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/meteo/, ''),
-      },
-      '/live-api/wiki-en': {
-        target: 'https://en.wikipedia.org',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/wiki-en/, ''),
-      },
-      '/live-api/wiki-de': {
-        target: 'https://de.wikipedia.org',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/wiki-de/, ''),
-      },
-      '/live-api/wiki-ja': {
-        target: 'https://ja.wikipedia.org',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/wiki-ja/, ''),
-      },
-      '/live-api/wiki-fr': {
-        target: 'https://fr.wikipedia.org',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-api\/wiki-fr/, ''),
-      },
-      '/live-ws/ripe': {
-        target: 'wss://ris-live.ripe.net',
-        ws: true,
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/live-ws\/ripe/, ''),
-      },
-    },
+    proxy: LIVE_PROXY,
+  },
+  preview: {
+    host: '127.0.0.1',
+    port: 4173,
+    strictPort: true,
+    proxy: LIVE_PROXY,
   },
 });

@@ -108,21 +108,31 @@
       <!-- LEFT COLUMN: OPERATIONS, SATELLITES, TELEMETRY -->
       <aside class="side-col left-col" id="leftCol">
         <div class="side-col-inner" data-col="left">
-        <!-- ACTIVE HOTSPOTS / OPERATIONS -->
+        <!-- ACTIVE HOTSPOTS / LIVE ANOMALIES -->
         <section class="hud-panel panel-ops" data-panel-id="ops" data-default-weight="44">
           <div class="panel-header">
-            <span class="panel-title"><i class="led led-accent"></i>ACTIVE OPERATIONS</span>
+            <span class="panel-title"><i class="led led-accent"></i><span id="opsPanelTitle">LIVE ANOMALIES</span></span>
             <div class="panel-header-right">
-              <span class="panel-meta" id="opsCountMeta">16 NODES // 4 CRIT</span>
+              <span class="panel-meta" id="opsCountMeta">0 LIVE // 0 CRIT</span>
+              <div class="ops-mode-tabs" id="opsModeTabs" role="group" aria-label="Operations list source">
+                <button type="button" class="active" data-ops-mode="live" title="Real-time global OSINT anomalies">LIVE</button>
+                <button type="button" data-ops-mode="sim" title="Scenario tactical operations">SIM</button>
+              </div>
               <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
             </div>
           </div>
-          <div class="panel-filter-row" id="nodeFilterRow">
-            <button class="micro-tab active" data-filter="ALL">ALL</button>
-            <button class="micro-tab" data-filter="CRITICAL">CRIT</button>
-            <button class="micro-tab" data-filter="WARNING">WARN</button>
-            <button class="micro-tab" data-filter="ALLIED">ALLY</button>
-            <button class="micro-tab" data-filter="COVERT">CVRT</button>
+          <div class="ops-toolbar">
+            <div class="panel-filter-row" id="nodeFilterRow">
+              <button class="micro-tab active" data-filter="ALL">ALL</button>
+              <button class="micro-tab" data-filter="CRITICAL">CRIT</button>
+              <button class="micro-tab" data-filter="WARNING">WARN</button>
+              <button class="micro-tab" data-filter="ALLIED">ALLY</button>
+              <button class="micro-tab" data-filter="COVERT">CVRT</button>
+            </div>
+            <div class="ops-search-wrap">
+              <input type="text" id="opsSearchInput" class="ops-search-input" placeholder="Search ops, quakes, callsign..." spellcheck="false" aria-label="Filter operations and anomalies" />
+              <button type="button" id="opsSearchClear" class="ops-search-clear hidden" title="Clear search">×</button>
+            </div>
           </div>
           <div class="ops-list scroll-thin" id="opsList"></div>
         </section>
@@ -154,17 +164,17 @@
           </div>
           <div class="sys-metrics scroll-thin">
             <div class="meter-row">
-              <span class="meter-label">QUANTUM DECRYPT</span>
+              <span class="meter-label" id="labelDecrypt">QUANTUM DECRYPT</span>
               <div class="meter-bar"><div class="meter-fill" id="meterDecrypt" style="width: 74%"></div></div>
               <span class="meter-val" id="valDecrypt">74%</span>
             </div>
             <div class="meter-row">
-              <span class="meter-label">SIGINT THROUGHPUT</span>
+              <span class="meter-label" id="labelSigint">SIGINT THROUGHPUT</span>
               <div class="meter-bar"><div class="meter-fill" id="meterSigint" style="width: 62%"></div></div>
               <span class="meter-val" id="valSigint">18.4 Gb/s</span>
             </div>
             <div class="meter-row">
-              <span class="meter-label">MESH INTEGRITY</span>
+              <span class="meter-label" id="labelMesh">MESH INTEGRITY</span>
               <div class="meter-bar"><div class="meter-fill meter-ok" id="meterMesh" style="width: 96%"></div></div>
               <span class="meter-val" id="valMesh">96%</span>
             </div>
@@ -272,7 +282,7 @@
 
         <!-- Floating Bottom-Right Live Coordinate Crosshair Readout -->
         <div class="map-hud-br">
-          <span id="coordReadout">LAT +00.0000°  LON +000.0000°  //  GRID 31N</span>
+          <span id="coordReadout">LAT +00.0000°  LON +000.0000°  //  MGRS 31N AA 6602 0000</span>
         </div>
       </section>
 
@@ -331,10 +341,11 @@
               <span class="wx-val" id="dossierWeatherVal">SYNCING OPEN-METEO...</span>
             </div>
 
-            <div class="dossier-actions">
+            <div class="dossier-actions" id="dossierActions">
               <button class="dossier-btn" id="btnDossierTrace">TRACE UPLINK</button>
               <button class="dossier-btn" id="btnDossierDecrypt">DECRYPT BURST</button>
               <button class="dossier-btn" id="btnDossierPing">SONAR PING</button>
+              <a class="dossier-source-btn hidden" id="btnDossierSource" href="#" target="_blank" rel="noopener noreferrer" title="Open primary external OSINT telemetry source">OPEN SOURCE ↗</a>
             </div>
           </div>
         </section>
@@ -390,6 +401,8 @@
         <button class="layer-pill active" data-layer="sigint" title="Toggle RF heat & interference pulses [4]"><em>4</em>SIGINT</button>
         <button class="layer-pill active" data-layer="grid" title="Toggle lat/lon tactical graticule [5]"><em>5</em>GRID</button>
         <button class="layer-pill active" data-layer="scan" title="Toggle sweep beam [6]"><em>6</em>SCAN</button>
+        <button class="layer-pill active" data-layer="terminator" title="Toggle solar day/night terminator [7]"><em>7</em>TERM</button>
+        <button class="layer-pill active" data-layer="cables" title="Toggle global subsea fiber trunk cables [8]"><em>8</em>CABLES</button>
       </div>
 
       <form class="cmd-form" id="cmdForm" autocomplete="off">
@@ -398,9 +411,10 @@
           type="text"
           id="cmdInput"
           class="cmd-input"
-          placeholder="help, trace, focus tokyo, mode globe, theme amber, defcon 1..."
+          placeholder="help, trace, focus tokyo, ops live, cables, mode globe, theme amber..."
           spellcheck="false"
         />
+        <span class="cmd-hint" id="cmdHint"></span>
       </form>
 
       <div class="bottom-telemetry">
