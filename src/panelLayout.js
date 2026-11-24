@@ -136,7 +136,7 @@ export class PanelLayoutManager {
     this._applyAll();
     this._saveState();
     this.onClick?.();
-    this.onLog?.('SIG', `RESET ${colInner.dataset.col?.toUpperCase() || ''} SIDEBAR PANEL PROPORTIONS.`);
+    this.onLog?.('INFO', `RESET ${colInner.dataset.col?.toUpperCase() || ''} SIDEBAR PANEL PROPORTIONS.`);
   }
 
   resetAll() {
@@ -144,7 +144,7 @@ export class PanelLayoutManager {
     this._applyAll();
     this._saveState();
     this.onClick?.();
-    this.onLog?.('SIG', 'ALL SIDEBAR WIDTHS, PANEL SIZES & COLLAPSE STATES RESET TO DEFAULT.');
+    this.onLog?.('INFO', 'ALL SIDEBAR WIDTHS, PANEL SIZES & COLLAPSE STATES RESET TO DEFAULT.');
   }
 
   _bindCollapse() {
@@ -237,7 +237,7 @@ export class PanelLayoutManager {
         this._applyAll();
         this._saveState();
         this.onClick?.();
-        this.onLog?.('SIG', `RESET ${side.toUpperCase()} SIDEBAR WIDTH TO DEFAULT.`);
+        this.onLog?.('INFO', `RESET ${side.toUpperCase()} SIDEBAR WIDTH TO DEFAULT.`);
       });
 
       rz.addEventListener('pointerdown', (e) => {

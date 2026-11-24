@@ -1,15 +1,44 @@
 // ============================================================================
-// AEGIS // SECONDARY TACTICAL CANVAS WIDGETS (RADAR, RF SPECTRUM, SPARKLINE)
+// AEGIS // SECONDARY TACTICAL CANVAS WIDGETS (PROXIMITY RADAR, TELEMETRY SPECTRUM, SPARKLINE)
 // ============================================================================
 
 import { getThemePalette, getCachedCssVar } from './utils.js';
+
+const DEG2RAD = Math.PI / 180;
+const TWO_PI = Math.PI * 2;
+const EARTH_RADIUS_KM = 6371;
+
+function computeGeodesic(lat1Deg, lon1Deg, lat2Deg, lon2Deg) {
+  const lat1 = lat1Deg * DEG2RAD;
+  const lat2 = lat2Deg * DEG2RAD;
+  const dLat = lat2 - lat1;
+  const dLon = (lon2Deg - lon1Deg) * DEG2RAD;
+
+  const sinHalfDLat = Math.sin(dLat * 0.5);
+  const sinHalfDLon = Math.sin(dLon * 0.5);
+  const cosLat1 = Math.cos(lat1);
+  const cosLat2 = Math.cos(lat2);
+
+  const a = sinHalfDLat * sinHalfDLat + cosLat1 * cosLat2 * sinHalfDLon * sinHalfDLon;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+  const distKm = EARTH_RADIUS_KM * c;
+
+  const y = Math.sin(dLon) * cosLat2;
+  const x = cosLat1 * Math.sin(lat2) - Math.sin(lat1) * cosLat2 * Math.cos(dLon);
+  const bearingRad = Math.atan2(y, x);
+
+  return { distKm, bearingRad };
+}
 
 export class RadarWidget {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.angle = 0;
-    this.blips = this._generateBlips(7);
+    this.blips = [];
+    this.maxRangeKm = 2500;
+    this.centerLat = null;
+    this.centerLon = null;
     this.modeColorVar = '--accent';
     this.pingPulse = 0;
     this._dpr = 0;
@@ -34,29 +63,130 @@ export class RadarWidget {
     this._setupHiDPI();
   }
 
-  _generateBlips(count) {
-    const out = [];
-    for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 0.18 + Math.random() * 0.72;
-      out.push({
-        angle: a,
-        r,
-        intensity: 0.2,
-        critical: i === 0,
-      });
-    }
-    return out;
-  }
-
   setTargetType(type) {
     if (type === 'CRITICAL') this.modeColorVar = '--crit';
     else if (type === 'WARNING') this.modeColorVar = '--warn';
-    else if (type === 'COVERT') this.modeColorVar = '--covert';
     else if (type === 'SAT') this.modeColorVar = '--ok';
+    else if (type === 'NETWORK') this.modeColorVar = '--covert';
     else this.modeColorVar = '--accent';
-    this.blips = this._generateBlips(type === 'CRITICAL' ? 10 : 6);
     this.triggerPing();
+  }
+
+  setContacts(centerLat, centerLon, liveData, maxRangeKm = 2500) {
+    const rangeKm = Number.isFinite(maxRangeKm) && maxRangeKm > 0 ? maxRangeKm : 2500;
+    this.maxRangeKm = rangeKm;
+
+    if (!Number.isFinite(centerLat) || !Number.isFinite(centerLon)) {
+      this.centerLat = null;
+      this.centerLon = null;
+      this.blips = [];
+      return;
+    }
+
+    this.centerLat = centerLat;
+    this.centerLon = centerLon;
+
+    if (!liveData || typeof liveData !== 'object') {
+      this.blips = [];
+      return;
+    }
+
+    const prevIntensity = new Map();
+    for (let i = 0; i < this.blips.length; i++) {
+      const b = this.blips[i];
+      if (b.id != null) prevIntensity.set(b.id, b.intensity);
+    }
+
+    const contacts = [];
+    const consider = (id, lat, lon, severity) => {
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      const { distKm, bearingRad } = computeGeodesic(centerLat, centerLon, lat, lon);
+      if (distKm < 1 || distKm > rangeKm) return;
+      const canvasAngle = ((bearingRad - Math.PI / 2) % TWO_PI + TWO_PI) % TWO_PI;
+      const r = Math.max(0.08, Math.min(0.96, distKm / rangeKm));
+      contacts.push({
+        id,
+        angle: canvasAngle,
+        r,
+        distKm,
+        severity,
+        intensity: prevIntensity.has(id) ? prevIntensity.get(id) : 0.35,
+      });
+    };
+
+    if (Array.isArray(liveData.quakes)) {
+      for (const q of liveData.quakes) {
+        const mag = Number(q?.mag) || 0;
+        const severity = mag >= 5.0 || q?.tsunami ? 'crit' : mag >= 4.0 ? 'warn' : 'accent';
+        consider(`quake:${q?.id ?? `${q?.lat},${q?.lon}`}`, q?.lat, q?.lon, severity);
+      }
+    }
+
+    if (Array.isArray(liveData.gdacs)) {
+      for (const g of liveData.gdacs) {
+        const lvl = String(g?.alertLevel || '').toLowerCase();
+        const severity = lvl === 'red' ? 'crit' : lvl === 'orange' ? 'warn' : 'accent';
+        consider(`gdacs:${g?.id ?? `${g?.lat},${g?.lon}`}`, g?.lat, g?.lon, severity);
+      }
+    }
+
+    if (Array.isArray(liveData.eonet)) {
+      for (const ev of liveData.eonet) {
+        const catId = String(ev?.categoryId || '').toLowerCase();
+        const catTitle = String(ev?.categoryTitle || '').toLowerCase();
+        let severity = 'accent';
+        if (catId === 'volcanoes' || catTitle.includes('volcan')) {
+          severity = 'crit';
+        } else if (
+          catId === 'severestorms' ||
+          catId === 'wildfires' ||
+          catTitle.includes('storm') ||
+          catTitle.includes('wildfire') ||
+          catTitle.includes('fire') ||
+          catTitle.includes('cyclone')
+        ) {
+          severity = 'warn';
+        }
+        consider(`eonet:${ev?.id ?? `${ev?.lat},${ev?.lon}`}`, ev?.lat, ev?.lon, severity);
+      }
+    }
+
+    if (Array.isArray(liveData.aircraft)) {
+      for (const ac of liveData.aircraft) {
+        const isEmergency =
+          Boolean(ac?.emergency) ||
+          ac?.squawk === '7700' ||
+          ac?.squawk === '7600' ||
+          ac?.squawk === '7500';
+        consider(
+          `ac:${ac?.id ?? ac?.hex ?? `${ac?.lat},${ac?.lon}`}`,
+          ac?.lat,
+          ac?.lon,
+          isEmergency ? 'crit' : 'accent'
+        );
+      }
+    }
+
+    if (Array.isArray(liveData.bgpCollectors)) {
+      for (const col of liveData.bgpCollectors) {
+        consider(`bgp:${col?.id ?? col?.host ?? `${col?.lat},${col?.lon}`}`, col?.lat, col?.lon, 'accent');
+      }
+    }
+
+    if (Array.isArray(liveData.liveSats)) {
+      for (const sat of liveData.liveSats) {
+        consider(`sat:${sat?.id ?? sat?.noradId ?? `${sat?.lat},${sat?.lon}`}`, sat?.lat, sat?.lon, 'ok');
+      }
+    }
+
+    if (Array.isArray(liveData.meteo)) {
+      for (const st of liveData.meteo) {
+        consider(`meteo:${st?.id ?? st?.name ?? `${st?.lat},${st?.lon}`}`, st?.lat, st?.lon, 'accent');
+      }
+    }
+
+    contacts.sort((a, b) => a.distKm - b.distKm);
+    this.blips = contacts.slice(0, 32);
   }
 
   triggerPing() {
@@ -64,28 +194,29 @@ export class RadarWidget {
   }
 
   render(dt) {
+    const safeDt = Math.max(0, dt || 0);
     const ctx = this.ctx;
     const w = this.w;
     const h = this.h;
     const cx = w / 2;
     const cy = h / 2;
-    const maxR = Math.min(w, h) / 2 - 5;
+    const maxR = Math.min(w, h) / 2 - 9;
 
-    const { accent, accentRgb } = getThemePalette();
+    const { accent, accentRgb, ok, warn, crit } = getThemePalette();
     const modeColor = getCachedCssVar(this.modeColorVar, accent);
 
     ctx.clearRect(0, 0, w, h);
 
-    // Subtle concentric range rings
+    // Concentric geodesic range rings (833km, 1666km, 2500km at default 2500km range)
     ctx.strokeStyle = `rgba(${accentRgb}, 0.22)`;
     ctx.lineWidth = 0.8;
     for (let i = 1; i <= 3; i++) {
       ctx.beginPath();
-      ctx.arc(cx, cy, (maxR / 3) * i, 0, Math.PI * 2);
+      ctx.arc(cx, cy, (maxR / 3) * i, 0, TWO_PI);
       ctx.stroke();
     }
 
-    // Crosshair lines
+    // Crosshair lines & micro-cardinal rim ticks
     ctx.strokeStyle = `rgba(${accentRgb}, 0.16)`;
     ctx.beginPath();
     ctx.moveTo(cx - maxR, cy);
@@ -94,9 +225,21 @@ export class RadarWidget {
     ctx.lineTo(cx, cy + maxR);
     ctx.stroke();
 
+    // Micro-cardinal labels (N, E, S, W)
+    ctx.save();
+    ctx.font = 'bold 6.5px "SF Mono", Menlo, monospace';
+    ctx.fillStyle = `rgba(${accentRgb}, 0.58)`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('N', cx, cy - maxR - 4.5);
+    ctx.fillText('S', cx, cy + maxR + 5);
+    ctx.fillText('E', cx + maxR + 5, cy + 0.5);
+    ctx.fillText('W', cx - maxR - 5, cy + 0.5);
+    ctx.restore();
+
     // Advance sweep angle
     const prevAngle = this.angle;
-    this.angle = (this.angle + dt * 2.15) % (Math.PI * 2);
+    this.angle = (this.angle + safeDt * 2.15) % TWO_PI;
 
     // Draw trailing radar wedge (segmented fan for smooth phosphor fade)
     const trailSteps = 18;
@@ -123,45 +266,56 @@ export class RadarWidget {
 
     // Expanding ping ring when triggered
     if (this.pingPulse > 0) {
-      this.pingPulse = Math.min(1, Math.max(0, this.pingPulse - Math.max(0, dt) * 1.1));
+      this.pingPulse = Math.min(1, Math.max(0, this.pingPulse - safeDt * 1.1));
       const pr = Math.max(0.5, (1 - this.pingPulse) * maxR);
       ctx.strokeStyle = modeColor;
       ctx.globalAlpha = this.pingPulse * 0.85;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(cx, cy, pr, 0, Math.PI * 2);
+      ctx.arc(cx, cy, pr, 0, TWO_PI);
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
 
-    // Blips lit when sweep crosses them
-    for (const b of this.blips) {
-      let diff = (this.angle - b.angle + Math.PI * 2) % (Math.PI * 2);
-      let prevDiff = (prevAngle - b.angle + Math.PI * 2) % (Math.PI * 2);
-      if (diff < 0.14 || prevDiff > Math.PI * 1.9) {
+    // Real geodesic contact blips lit when sweep crosses their bearing
+    for (let i = 0; i < this.blips.length; i++) {
+      const b = this.blips[i];
+      const diff = (this.angle - b.angle + TWO_PI) % TWO_PI;
+      const prevDiff = (prevAngle - b.angle + TWO_PI) % TWO_PI;
+      if (diff < 0.14 || (prevDiff > Math.PI && diff < Math.PI)) {
         b.intensity = 1.0;
       } else {
-        b.intensity = Math.max(0.14, b.intensity - dt * 0.42);
+        b.intensity = Math.max(0.16, b.intensity - safeDt * 0.42);
       }
 
       const bx = cx + Math.cos(b.angle) * b.r * maxR;
       const by = cy + Math.sin(b.angle) * b.r * maxR;
+      const blipColor =
+        b.severity === 'crit'
+          ? crit
+          : b.severity === 'warn'
+          ? warn
+          : b.severity === 'ok'
+          ? ok
+          : accent;
+      const blipRadius =
+        b.severity === 'crit' ? 2.5 : b.severity === 'warn' || b.severity === 'ok' ? 2.1 : 1.7;
 
       ctx.save();
       ctx.globalAlpha = b.intensity;
-      ctx.fillStyle = b.critical ? modeColor : accent;
-      ctx.shadowColor = b.critical ? modeColor : accent;
+      ctx.fillStyle = blipColor;
+      ctx.shadowColor = blipColor;
       ctx.shadowBlur = 6;
       ctx.beginPath();
-      ctx.arc(bx, by, b.critical ? 2.5 : 1.7, 0, Math.PI * 2);
+      ctx.arc(bx, by, blipRadius, 0, TWO_PI);
       ctx.fill();
       ctx.restore();
     }
 
-    // Center dot
-    ctx.fillStyle = accent;
+    // Center lock dot
+    ctx.fillStyle = modeColor;
     ctx.beginPath();
-    ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 2, 0, TWO_PI);
     ctx.fill();
   }
 }
@@ -170,10 +324,7 @@ export class SpectrumWidget {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.mode = 'goes'; // 'goes' | 'bgp' | 'rf'
-    this.barCount = 34;
-    this.bars = new Float32Array(this.barCount);
-    this.peaks = new Float32Array(this.barCount);
+    this.mode = 'goes'; // 'goes' | 'bgp' | 'quakes'
     this.bgpSmooth = new Float32Array(24);
     this.time = 0;
     this.intensityBoost = 0;
@@ -182,7 +333,7 @@ export class SpectrumWidget {
   }
 
   setMode(mode) {
-    if (['goes', 'bgp', 'rf'].includes(mode)) {
+    if (['goes', 'bgp', 'quakes'].includes(mode)) {
       this.mode = mode;
       this.render(0, false, this.liveData);
     }
@@ -210,7 +361,7 @@ export class SpectrumWidget {
   }
 
   render(rawDt, alertActive = false, liveData = null) {
-    const dt = Math.max(0, rawDt);
+    const dt = Math.max(0, rawDt || 0);
     const ctx = this.ctx;
     const w = this.w;
     const h = this.h;
@@ -229,7 +380,7 @@ export class SpectrumWidget {
     } else if (this.mode === 'bgp') {
       this._renderBgp(ctx, w, h, dt, palette);
     } else {
-      this._renderRf(ctx, w, h, dt, alertActive, palette);
+      this._renderQuakes(ctx, w, h, palette);
     }
   }
 
@@ -418,7 +569,7 @@ export class SpectrumWidget {
       const pulseR = 2.2 + Math.sin(this.time * 5) * 0.8;
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
-      ctx.arc(lastX, lastY, Math.max(1.2, pulseR), 0, Math.PI * 2);
+      ctx.arc(lastX, lastY, Math.max(1.2, pulseR), 0, TWO_PI);
       ctx.fill();
       ctx.restore();
     }
@@ -503,99 +654,183 @@ export class SpectrumWidget {
   }
 
   // --------------------------------------------------------------------------
-  // MODE 3: PROCEDURAL SIGINT RF SPECTRUM & CARRIER OSCILLOSCOPE
+  // MODE 3: LIVE USGS 24H SEISMIC MAGNITUDE TIMELINE & FOCAL DEPTH PROFILE
   // --------------------------------------------------------------------------
-  _renderRf(ctx, w, h, dt, alertActive, { accent, accentRgb, crit, warn }) {
+  _renderQuakes(ctx, w, h, { accent, accentRgb, ok, okRgb, warn, warnRgb, crit, critRgb }) {
+    const quakes = this.liveData?.quakes || [];
     const splitY = Math.floor(h * 0.56);
 
-    // Grid lines
-    ctx.strokeStyle = `rgba(${accentRgb}, 0.1)`;
+    // Subtle divider between Magnitude Timeline (top) and Focal Depth Profile (bottom)
+    ctx.strokeStyle = `rgba(${accentRgb}, 0.28)`;
     ctx.lineWidth = 1;
-    for (let y = 12; y < h; y += 16) {
-      ctx.beginPath();
-      ctx.moveTo(0, y + 0.5);
-      ctx.lineTo(w, y + 0.5);
-      ctx.stroke();
-    }
-
-    // Divider line
-    ctx.strokeStyle = `rgba(${accentRgb}, 0.25)`;
     ctx.beginPath();
     ctx.moveTo(0, splitY + 0.5);
     ctx.lineTo(w, splitY + 0.5);
     ctx.stroke();
 
-    // Update and draw FFT Spectrum Bars (Top half)
-    const barSlot = w / this.barCount;
-    const barW = Math.max(2, barSlot - 2);
-    const boost = (alertActive ? 0.42 : 0) + this.intensityBoost * 0.48;
-
-    for (let i = 0; i < this.barCount; i++) {
-      const norm = i / this.barCount;
-      const carrier1 = Math.exp(-Math.pow((norm - 0.32) * 7.5, 2)) * 0.65;
-      const carrier2 = Math.exp(-Math.pow((norm - 0.72) * 9.0, 2)) * 0.55;
-      const wave = 0.22 + 0.18 * Math.sin(this.time * 4.5 + i * 0.55) + Math.random() * 0.24;
-      const target = Math.min(
-        0.98,
-        Math.max(
-          0.06,
-          wave * 0.55 +
-            carrier1 * (0.6 + 0.4 * Math.sin(this.time * 7)) +
-            carrier2 * (0.55 + 0.45 * Math.cos(this.time * 5.2)) +
-            boost * Math.random()
-        )
-      );
-
-      this.bars[i] += (target - this.bars[i]) * Math.min(1, dt * 16 + 0.2);
-      if (this.bars[i] > this.peaks[i]) {
-        this.peaks[i] = this.bars[i];
-      } else {
-        this.peaks[i] = Math.max(this.bars[i], this.peaks[i] - dt * 0.45);
-      }
-
-      const bh = this.bars[i] * (splitY - 6);
-      const x = i * barSlot + 1;
-      const y = splitY - bh;
-
-      if (this.bars[i] > 0.78 || alertActive) {
-        ctx.fillStyle = this.bars[i] > 0.82 ? crit : warn;
-      } else {
-        ctx.fillStyle = `rgba(${accentRgb}, 0.78)`;
-      }
-      ctx.fillRect(x, y, barW, bh);
-
-      const py = splitY - this.peaks[i] * (splitY - 6) - 2;
-      ctx.fillStyle = alertActive ? crit : accent;
-      ctx.fillRect(x, Math.max(2, py), barW, 1.5);
+    if (!quakes.length) {
+      const sx = ((this.time * 0.6) % 1) * w;
+      ctx.strokeStyle = `rgba(${accentRgb}, 0.4)`;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, h);
+      ctx.stroke();
+      ctx.font = '8.5px "SF Mono", Menlo, monospace';
+      ctx.fillStyle = accent;
+      ctx.fillText('ACQUIRING USGS 24H SEISMIC TELEMETRY...', 8, splitY - 12);
+      return;
     }
 
-    // Bottom half: RF Carrier Oscilloscope Waveform
-    const waveMid = splitY + (h - splitY) / 2;
-    const waveAmp = (h - splitY) * 0.38;
+    // Sort chronologically oldest -> newest by event timestamp
+    const sorted = [...quakes].sort((a, b) => (a.time || 0) - (b.time || 0));
+    const recent = sorted.slice(-56);
+    const latest = sorted[sorted.length - 1];
+    let maxMag = 0;
+    for (let i = 0; i < sorted.length; i++) {
+      const m = Number(sorted[i].mag) || 0;
+      if (m > maxMag) maxMag = m;
+    }
+
+    // --- TOP HALF: 24H EARTHQUAKE MAGNITUDE TIMELINE (M2.0 TO M8.0 SCALE) ---
+    const topPad = 13;
+    const plotH = Math.max(16, splitY - topPad - 3);
+    const minMag = 2.0;
+    const maxScaleMag = 8.0;
+    const magToY = (mag) => {
+      const clamped = Math.max(minMag, Math.min(maxScaleMag, mag));
+      const norm = (clamped - minMag) / (maxScaleMag - minMag);
+      return splitY - 2 - norm * plotH;
+    };
+
+    // Dashed horizontal reference lines for M4, M5, M6
+    const refLines = [
+      { mag: 4, label: 'M4', stroke: `rgba(${accentRgb}, 0.28)`, labelColor: accent },
+      { mag: 5, label: 'M5', stroke: `rgba(${warnRgb}, 0.36)`, labelColor: warn },
+      { mag: 6, label: 'M6', stroke: `rgba(${critRgb}, 0.44)`, labelColor: crit },
+    ];
+    ctx.font = '7.5px "SF Mono", Menlo, monospace';
+    for (const ref of refLines) {
+      const y = magToY(ref.mag);
+      ctx.strokeStyle = ref.stroke;
+      ctx.lineWidth = 0.7;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w - 16, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = ref.labelColor;
+      ctx.fillText(ref.label, w - 14, y + 2.5);
+    }
+
+    // Vertical magnitude bars for up to 56 most recent earthquakes
+    const plotW = w - 17;
+    const slot = plotW / recent.length;
+    const barW = Math.max(2, Math.min(12, slot - 1.5));
+    const scanIdx = Math.floor((this.time * 9) % recent.length);
+
+    for (let i = 0; i < recent.length; i++) {
+      const mag = Number(recent[i].mag) || 0;
+      const y = magToY(mag);
+      const bh = Math.max(1.5, splitY - 2 - y);
+      const x = i * slot + (slot - barW) * 0.5;
+
+      let barColor = `rgba(${accentRgb}, 0.74)`;
+      let capColor = accent;
+      if (mag >= 5.0) {
+        barColor = `rgba(${critRgb}, 0.86)`;
+        capColor = crit;
+      } else if (mag >= 4.0) {
+        barColor = `rgba(${warnRgb}, 0.85)`;
+        capColor = warn;
+      } else if (mag >= 3.5) {
+        barColor = `rgba(${okRgb}, 0.78)`;
+        capColor = ok;
+      }
+
+      ctx.fillStyle = i === scanIdx ? '#ffffff' : barColor;
+      ctx.fillRect(x, y, barW, bh);
+      ctx.fillStyle = capColor;
+      ctx.fillRect(x, Math.max(topPad, y - 1.2), barW, 1.4);
+    }
+
+    // Top-left live USGS Seismic readout badge
+    const topBadge = `USGS 24H SEISMIC (${quakes.length} EVENTS • MAX M${maxMag.toFixed(1)})`;
+    ctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+    const topBadgeW = Math.min(w - 4, Math.ceil(ctx.measureText(topBadge).width) + 6);
+    ctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+    ctx.fillRect(2, 1, topBadgeW, 10.5);
+    ctx.fillStyle = maxMag >= 5.0 ? crit : maxMag >= 4.0 ? warn : accent;
+    ctx.fillText(topBadge, 4, 9);
+
+    // --- BOTTOM HALF: FOCAL DEPTH PROFILE (0 TO MAX(100, MAXDEPTH) KM) ---
+    const depthTop = splitY + 13;
+    const depthBot = h - 4;
+    const depthH = Math.max(14, depthBot - depthTop);
+
+    let maxObservedDepth = 0;
+    for (let i = 0; i < recent.length; i++) {
+      const d = Math.max(0, Number(recent[i].depthKm) || 0);
+      if (d > maxObservedDepth) maxObservedDepth = d;
+    }
+    const maxDepth = Math.max(100, maxObservedDepth);
+    const depthToY = (depthKm) => {
+      const clamped = Math.max(0, Math.min(maxDepth, Number(depthKm) || 0));
+      // Surface (0 km) near depthTop; deeper hypocenters extend downward toward depthBot
+      return depthTop + (clamped / maxDepth) * depthH;
+    };
+
+    const latestMag = Number(latest?.mag) || 0;
+    const latestDepth = Number(latest?.depthKm ?? 0);
+    const traceColor = latestMag >= 5.0 ? crit : latestMag >= 4.0 ? warn : ok;
+    const traceRgb = latestMag >= 5.0 ? critRgb : latestMag >= 4.0 ? warnRgb : okRgb;
 
     ctx.save();
-    ctx.strokeStyle = alertActive ? crit : accent;
-    ctx.lineWidth = 1.3;
-    ctx.shadowColor = alertActive ? crit : accent;
-    ctx.shadowBlur = 6;
-    ctx.beginPath();
+    let lastX = 2;
+    let lastY = depthToY(latestDepth);
+    if (recent.length > 1) {
+      ctx.beginPath();
+      for (let i = 0; i < recent.length; i++) {
+        const x = (i / (recent.length - 1)) * (w - 6) + 2;
+        const y = depthToY(recent[i].depthKm);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+        lastX = x;
+        lastY = y;
+      }
+      ctx.strokeStyle = traceColor;
+      ctx.lineWidth = 1.35;
+      ctx.shadowColor = traceColor;
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
 
-    const samples = 88;
-    for (let i = 0; i <= samples; i++) {
-      const t = i / samples;
-      const x = t * w;
-      const env = Math.sin(t * Math.PI);
-      const sig =
-        Math.sin(t * 28 + this.time * 13) * 0.52 +
-        Math.sin(t * 62 - this.time * 21) * 0.28 +
-        Math.cos(t * 14 + this.time * 6) * 0.2;
-      const jitter = alertActive || this.intensityBoost > 0.2 ? (Math.random() - 0.5) * 0.45 : 0;
-      const y = waveMid + (sig + jitter) * waveAmp * (0.45 + 0.55 * env) * (1 + boost * 0.45);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+      // Soft shaded depth profile fill
+      ctx.lineTo(lastX, depthBot);
+      ctx.lineTo(2, depthBot);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(${traceRgb}, 0.13)`;
+      ctx.fill();
+    } else {
+      lastX = w - 6;
     }
-    ctx.stroke();
+
+    // Pulsing newest-event beacon on the right
+    const pulseR = 2.2 + Math.sin(this.time * 5) * 0.8;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, Math.max(1.2, pulseR), 0, TWO_PI);
+    ctx.fill();
     ctx.restore();
+
+    // Bottom-left Focal Depth readout badge
+    const botBadge = `FOCAL DEPTH • LATEST M${latestMag.toFixed(1)} (${latestDepth} KM)`;
+    ctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+    const botBadgeW = Math.min(w - 4, Math.ceil(ctx.measureText(botBadge).width) + 6);
+    ctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+    ctx.fillRect(2, splitY + 2, botBadgeW, 10.5);
+    ctx.fillStyle = traceColor;
+    ctx.fillText(botBadge, 4, splitY + 10);
   }
 }
 
@@ -603,7 +838,7 @@ export class SparklineWidget {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.values = Array.from({ length: 28 }, () => 0.28 + Math.random() * 0.22);
+    this.values = new Array(28).fill(0.12);
     this._dpr = 0;
     this._setupHiDPI();
   }

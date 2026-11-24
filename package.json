@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "AEGIS // Global Strategic Situation Room Dashboard",
+  "description": "AEGIS // Global Live Telemetry & OSINT Monitor",
   "scripts": {
     "dev": "vite --port 4173 --host 127.0.0.1",
     "build": "vite build",

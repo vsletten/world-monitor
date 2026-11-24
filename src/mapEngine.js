@@ -23,9 +23,7 @@ import {
 import { SUBSEA_CABLES } from './subseaCables.js';
 
 const HIT_PRIORITY_BIAS = {
-  node: 0,
   liveSat: 1,
-  sat: 1.5,
   gdacs: 1.5,
   quake: 2,
   eonet: 2,
@@ -37,24 +35,11 @@ const HIT_PRIORITY_BIAS = {
 };
 
 export class WorldMapEngine {
-  constructor(canvas, { nodes, arcs, satellites, liveFeeds, onSelectNode, onSelectSat, onSelectLive, onHover, onCoords }) {
+  constructor(canvas, { liveFeeds, onSelectLive, onHover, onCoords } = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.nodes = nodes;
-    this.nodeById = new Map(nodes.map((n) => [n.id, n]));
-    this.arcs = arcs.map((a, idx) => ({
-      ...a,
-      progress: (idx * 0.17) % 1,
-      interpolator: geoInterpolate(
-        [this.nodeById.get(a.from).lon, this.nodeById.get(a.from).lat],
-        [this.nodeById.get(a.to).lon, this.nodeById.get(a.to).lat]
-      ),
-    }));
-    this.satellites = satellites.map((s) => ({ ...s, lat: 0, lon: 0 }));
     this.liveFeeds = liveFeeds || null;
 
-    this.onSelectNode = onSelectNode;
-    this.onSelectSat = onSelectSat;
     this.onSelectLive = onSelectLive;
     this.onHover = onHover;
     this.onCoords = onCoords;
@@ -90,14 +75,14 @@ export class WorldMapEngine {
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     this.layers = {
-      nodes: true,
-      arcs: true,
-      satellites: false, // superseded by liveSats by default, still toggleable!
-      sigint: true,
-      grid: true,
-      scan: true,
+      // Visual overlay layers (1–6)
       terminator: true,
       cables: true,
+      aurora: true,
+      bgpArcs: true,
+      trails: true,
+      grid: true,
+      // Data feed layers
       liveSats: true,
       quakes: true,
       eonet: true,
@@ -109,14 +94,8 @@ export class WorldMapEngine {
       wiki: true,
     };
 
-    this.selectedNodeId = 'zurich';
-    this.selectedSatId = null;
     this.selectedLive = null; // { kind: 'liveSat'|'quake'|'eonet'|'aircraft'|'bgp'|'gdacs'|'meteo'|'wiki'|'cable', id }
     this.hoveredItem = null;
-    this.alertActive = false;
-
-    // Active trace animation state
-    this.trace = null; // { waypoints: [{ id, lon, lat, label }], nodeIds: [], activeStep: 0, segProgress: 0, finished: false }
 
     // Expanding sonar ping rings
     this.pings = []; // { lon, lat, age, maxAge, colorVar }
@@ -131,7 +110,6 @@ export class WorldMapEngine {
 
     // Animation timers & caches
     this.time = 0;
-    this.scanX = 0;
     this._hatchTile = null;
     this._hatchTileAccent = '';
     this._hatchPatterns = new WeakMap();
@@ -226,10 +204,40 @@ export class WorldMapEngine {
     this.target2D = null;
     this.targetRotation = null;
     this.invalidateCache();
-    if (this.mode === '3d' && this.selectedNodeId) {
-      const node = this.nodeById.get(this.selectedNodeId);
-      if (node) this.focusLonLat(node.lon, node.lat);
+    if (this.mode === '3d' && this.selectedLive) {
+      const coords = this._findLiveCoords(this.selectedLive);
+      if (coords) this.focusLonLat(coords[0], coords[1]);
     }
+  }
+
+  _findLiveCoords(sel) {
+    if (!sel) return null;
+    if (sel.kind === 'cable') {
+      const entry = this._cableGeoms.find((c) => c.cable.id === sel.id);
+      if (entry && Number.isFinite(entry.cable.lon) && Number.isFinite(entry.cable.lat)) {
+        return [entry.cable.lon, entry.cable.lat];
+      }
+      return null;
+    }
+    const data = this.liveFeeds?.data;
+    if (!data) return null;
+    const listMap = {
+      liveSat: data.liveSats,
+      quake: data.quakes,
+      eonet: data.eonet,
+      aircraft: data.aircraft,
+      bgp: data.bgpCollectors,
+      gdacs: data.gdacs,
+      meteo: data.meteo,
+      wiki: data.wikiHubs,
+    };
+    const list = listMap[sel.kind];
+    if (!Array.isArray(list)) return null;
+    const item = list.find((it) => it.id === sel.id);
+    if (item && Number.isFinite(item.lon) && Number.isFinite(item.lat)) {
+      return [item.lon, item.lat];
+    }
+    return null;
   }
 
   setLayer(name, enabled) {
@@ -305,30 +313,8 @@ export class WorldMapEngine {
     }
   }
 
-  selectNode(id, focus = true) {
-    const node = this.nodeById.get(id);
-    if (!node) return;
-    this.selectedNodeId = id;
-    this.selectedSatId = null;
-    this.selectedLive = null;
-    this.triggerPing(node.lon, node.lat, this._typeColorVar(node.type));
-    if (focus) this.focusLonLat(node.lon, node.lat);
-  }
-
-  selectSat(id, focus = true) {
-    const sat = this.satellites.find((s) => s.id === id);
-    if (!sat) return;
-    this.selectedSatId = id;
-    this.selectedNodeId = null;
-    this.selectedLive = null;
-    this.triggerPing(sat.lon, sat.lat, '--ok');
-    if (focus) this.focusLonLat(sat.lon, sat.lat);
-  }
-
   selectLive(kind, item, focus = true) {
     if (!item) return;
-    this.selectedNodeId = null;
-    this.selectedSatId = null;
     this.selectedLive = { kind, id: item.id };
     const colorVar =
       kind === 'quake'
@@ -342,80 +328,18 @@ export class WorldMapEngine {
         : kind === 'cable'
         ? '--secondary'
         : '--accent';
-    this.triggerPing(item.lon, item.lat, colorVar);
-    if (focus) this.focusLonLat(item.lon, item.lat);
+    if (Number.isFinite(item.lon) && Number.isFinite(item.lat)) {
+      this.triggerPing(item.lon, item.lat, colorVar);
+      if (focus) this.focusLonLat(item.lon, item.lat);
+    }
+  }
+
+  clearSelection() {
+    this.selectedLive = null;
   }
 
   triggerPing(lon, lat, colorVar = '--accent') {
     this.pings.push({ lon, lat, age: 0, maxAge: 1.6, colorVar });
-  }
-
-  _normalizeTraceWaypoint(wp) {
-    if (typeof wp === 'string') {
-      const node = this.nodeById.get(wp);
-      if (!node) return null;
-      return {
-        id: node.id,
-        lon: node.lon,
-        lat: node.lat,
-        label: node.code || node.city || node.id,
-      };
-    }
-    if (wp && typeof wp === 'object' && Number.isFinite(wp.lon) && Number.isFinite(wp.lat)) {
-      return {
-        id: wp.id || `${wp.lon.toFixed(2)},${wp.lat.toFixed(2)}`,
-        lon: wp.lon,
-        lat: wp.lat,
-        label: wp.label || wp.code || wp.callsign || wp.name || wp.id || '',
-      };
-    }
-    return null;
-  }
-
-  startTrace(waypoints) {
-    const normalized = (Array.isArray(waypoints) ? waypoints : [])
-      .map((wp) => this._normalizeTraceWaypoint(wp))
-      .filter(Boolean);
-    if (!normalized.length) {
-      this.trace = null;
-      return;
-    }
-    this.trace = {
-      waypoints: normalized,
-      nodeIds: normalized.map((w) => w.id),
-      activeStep: 0,
-      segProgress: 0,
-      finished: false,
-    };
-    const first = normalized[0];
-    if (first) {
-      this.triggerPing(first.lon, first.lat, '--accent');
-      if (this.mode === '3d') this.focusLonLat(first.lon, first.lat);
-    }
-  }
-
-  setTraceStep(step, finished = false) {
-    if (!this.trace) return;
-    this.trace.activeStep = step;
-    this.trace.segProgress = 0;
-    this.trace.finished = finished;
-    const wps = this.trace.waypoints || [];
-    const wp = wps[Math.min(step, wps.length - 1)];
-    if (wp) {
-      this.triggerPing(wp.lon, wp.lat, finished ? '--ok' : '--crit');
-      if (this.mode === '3d') this.focusLonLat(wp.lon, wp.lat);
-    }
-  }
-
-  clearTrace() {
-    this.trace = null;
-  }
-
-  _typeColorVar(type) {
-    if (type === 'CRITICAL') return '--crit';
-    if (type === 'WARNING') return '--warn';
-    if (type === 'COVERT') return '--covert';
-    return '--accent';
   }
 
   _getProjection(unclipped = false) {
@@ -554,16 +478,8 @@ export class WorldMapEngine {
           this.hoveredItem = hit;
           this.onHover?.(hit, mx, my);
 
-          if (hit.kind === 'node') {
-            this.selectNode(hit.item.id, false);
-            this.onSelectNode?.(hit.item);
-          } else if (hit.kind === 'sat') {
-            this.selectSat(hit.item.id, false);
-            this.onSelectSat?.(hit.item);
-          } else {
-            this.selectLive(hit.kind, hit.item, false);
-            this.onSelectLive?.(hit.kind, hit.item);
-          }
+          this.selectLive(hit.kind, hit.item, false);
+          this.onSelectLive?.(hit.kind, hit.item);
         }
       }
     });
@@ -602,6 +518,7 @@ export class WorldMapEngine {
     const hits = [];
 
     const testList = (list, kind, radius = 17) => {
+      if (!Array.isArray(list)) return;
       const bias = HIT_PRIORITY_BIAS[kind] ?? 3;
       for (const item of list) {
         if (!this._isVisible3D(item.lon, item.lat)) continue;
@@ -613,9 +530,6 @@ export class WorldMapEngine {
         }
       }
     };
-
-    if (this.layers.nodes) testList(this.nodes, 'node', 17);
-    if (this.layers.satellites) testList(this.satellites, 'sat', 16);
 
     if (this.liveFeeds) {
       if (this.layers.liveSats) testList(this.liveFeeds.data.liveSats, 'liveSat', 16);
@@ -681,15 +595,6 @@ export class WorldMapEngine {
     return hits.length ? { kind: hits[0].kind, item: hits[0].item } : null;
   }
 
-  _updateSatellites() {
-    for (const s of this.satellites) {
-      const phase = this.time * s.speed + s.phaseOffset;
-      s.lat = Math.sin(phase) * s.inclination;
-      let lon = ((s.lonOffset + (this.time * s.speed * 57.2958) * 1.15) % 360 + 540) % 360 - 180;
-      s.lon = lon;
-    }
-  }
-
   _tryPlaceLabel(x, y, w, h, force = false) {
     const pad = 2;
     const bx = x - pad;
@@ -728,20 +633,8 @@ export class WorldMapEngine {
   render(rawDt) {
     const dt = Math.max(0, rawDt);
     this.time += dt;
-    this.scanX = (this.scanX + dt * 0.085) % 1;
     this._labelBoxes = [];
     this._deferredLabels = [];
-
-    // Update arc packets
-    const speedMult = this.alertActive ? 1.85 : 1.0;
-    for (const a of this.arcs) {
-      a.progress = (a.progress + dt * a.speed * speedMult) % 1;
-    }
-
-    // Update trace segment progress
-    if (this.trace && !this.trace.finished) {
-      this.trace.segProgress = Math.min(1, this.trace.segProgress + dt * 1.35);
-    }
 
     // Smooth 2D glide interpolation (focusLonLat / resetView)
     if (this.mode === '2d' && !this.dragging && this.target2D) {
@@ -777,9 +670,6 @@ export class WorldMapEngine {
       }
     }
 
-    // Update satellites
-    this._updateSatellites();
-
     // Update sonar ping rings
     for (let i = this.pings.length - 1; i >= 0; i--) {
       this.pings[i].age += dt;
@@ -795,7 +685,7 @@ export class WorldMapEngine {
     const proj = this._getProjection(false);
     const path = geoPath(proj, ctx);
 
-    // 1-4. Base layers: cached single-blit offscreen pass in 2D, live dual-res pass in 3D
+    // 1. Base layers: cached single-blit offscreen pass in 2D, live dual-res pass in 3D
     if (this.mode === '2d') {
       this._render2DBaseLayer(ctx, proj, palette);
     } else {
@@ -807,47 +697,27 @@ export class WorldMapEngine {
       this._drawWorldWireframe(ctx, path, palette, this.dragging);
     }
 
-    // 4.5. Real-Time Solar Terminator (Day/Night hemisphere + twilight + subsolar marker)
+    // 2. Real-Time Solar Terminator (Day/Night hemisphere + twilight + subsolar marker)
     if (this.layers.terminator) {
       this._drawSolarTerminator(ctx, path, proj, palette);
     }
 
-    // 5. Globe front atmospheric rim (3D only)
+    // 3. Globe front atmospheric rim (3D only)
     if (this.mode === '3d') {
       this._drawGlobeFrontRim(ctx, proj, palette);
     }
 
-    // 6. Sweep Scanline Beam (2D)
-    if (this.layers.scan && this.mode === '2d') {
-      this._drawScanSweep(ctx, palette);
-    }
-
-    // 6.5. Live NOAA Solar / Geomagnetic Aurora Ovals
-    if (this.layers.solar && this.liveFeeds?.data.solar) {
+    // 4. Live NOAA Solar / Geomagnetic Aurora Ovals
+    if (this.layers.aurora && this.layers.solar && this.liveFeeds?.data.solar) {
       this._drawSolarAurora(ctx, path, palette);
     }
 
-    // 6.8. Subsea Fiber Trunk Cables
+    // 5. Subsea Fiber Trunk Cables
     if (this.layers.cables) {
       this._drawSubseaCables(ctx, path, proj, palette);
     }
 
-    // 7. SIGINT RF Heat / Interference Zones
-    if (this.layers.sigint) {
-      this._drawSigintZones(ctx, proj, palette);
-    }
-
-    // 8. Great-Circle Trajectory / Data Arcs + Moving Light Packets
-    if (this.layers.arcs) {
-      this._drawArcs(ctx, proj, palette);
-    }
-
-    // 9. Active Multi-Hop Signal Trace Beam
-    if (this.trace) {
-      this._drawTraceOverlay(ctx, proj, palette);
-    }
-
-    // 9.5. Live Public Data Overlays: Meteo, BGP IXPs, USGS Quakes, UN GDACS, NASA EONET, Wiki, ADS-B
+    // 6. Live Public Data Overlays: Meteo, BGP IXPs, USGS Quakes, UN GDACS, NASA EONET, Wiki, ADS-B
     if (this.liveFeeds) {
       if (this.layers.meteo) this._drawLiveMeteo(ctx, proj);
       if (this.layers.bgp) this._drawLiveBgp(ctx, proj, palette);
@@ -858,26 +728,18 @@ export class WorldMapEngine {
       if (this.layers.aircraft) this._drawLiveAircraft(ctx, proj, palette);
     }
 
-    // 10. Orbital Satellites (Simulated & Real Live NORAD/ISS SGP4)
-    if (this.layers.satellites) {
-      this._drawSatellites(ctx, proj, path, palette);
-    }
+    // 7. Live Orbital Satellites (NORAD/ISS SGP4)
     if (this.layers.liveSats && this.liveFeeds?.data.liveSats.length) {
       this._drawLiveSatellites(ctx, proj, path, palette);
     }
 
-    // 11. Sonar Ping Ripples
+    // 8. Sonar Ping Ripples
     this._drawPings(ctx, proj, palette);
 
-    // 12. Global Tactical Nodes + Labels + Target Lock Reticle
-    if (this.layers.nodes) {
-      this._drawNodes(ctx, proj, palette);
-    }
-
-    // 12.5. Priority-sorted de-cluttered labels
+    // 9. Priority-sorted de-cluttered labels
     this._flushDeferredLabels(ctx);
 
-    // 13. Live Cursor Tactical Crosshair
+    // 10. Live Cursor Tactical Crosshair
     if (this.mouse.inside && !this.dragging) {
       this._drawCrosshair(ctx, palette);
     }
@@ -1233,50 +1095,6 @@ export class WorldMapEngine {
     ctx.restore();
   }
 
-  _drawScanSweep(ctx, { accentRgb }) {
-    const x = this.scanX * this.w;
-    const trailW = 90;
-    ctx.save();
-    const grad = ctx.createLinearGradient(x - trailW, 0, x, 0);
-    grad.addColorStop(0, `rgba(${accentRgb}, 0)`);
-    grad.addColorStop(0.85, `rgba(${accentRgb}, 0.07)`);
-    grad.addColorStop(1, `rgba(${accentRgb}, 0.22)`);
-    ctx.fillStyle = grad;
-    ctx.fillRect(x - trailW, 0, trailW, this.h);
-
-    ctx.strokeStyle = `rgba(${accentRgb}, 0.45)`;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, this.h);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  _drawSigintZones(ctx, proj, { critRgb, warnRgb, covertRgb }) {
-    ctx.save();
-    for (const n of this.nodes) {
-      if (n.type === 'ALLIED') continue;
-      if (!this._isVisible3D(n.lon, n.lat)) continue;
-      const pt = proj([n.lon, n.lat]);
-      if (!pt) continue;
-
-      const rgb = n.type === 'CRITICAL' ? critRgb : n.type === 'WARNING' ? warnRgb : covertRgb;
-      const pulse = 0.72 + 0.28 * Math.sin(this.time * 2.6 + n.lon);
-      const r = (n.type === 'CRITICAL' ? 42 : 30) * Math.min(1.5, this.zoom * 0.9) * pulse;
-
-      const grad = ctx.createRadialGradient(pt[0], pt[1], 2, pt[0], pt[1], r);
-      grad.addColorStop(0, `rgba(${rgb}, 0.28)`);
-      grad.addColorStop(0.55, `rgba(${rgb}, 0.08)`);
-      grad.addColorStop(1, `rgba(${rgb}, 0)`);
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(pt[0], pt[1], r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-
   _sampleGeodesicScreenPoints(interp, proj, steps = 40) {
     const segments = [];
     let current = [];
@@ -1307,253 +1125,6 @@ export class WorldMapEngine {
     return segments;
   }
 
-  _drawArcs(ctx, proj, palette) {
-    ctx.save();
-    for (const a of this.arcs) {
-      const color =
-        a.type === 'CRITICAL'
-          ? palette.crit
-          : a.type === 'WARNING'
-          ? palette.warn
-          : a.type === 'COVERT'
-          ? palette.covert
-          : palette.accent;
-      const rgb =
-        a.type === 'CRITICAL'
-          ? palette.critRgb
-          : a.type === 'WARNING'
-          ? palette.warnRgb
-          : a.type === 'COVERT'
-          ? palette.covertRgb
-          : palette.accentRgb;
-
-      const segments = this._sampleGeodesicScreenPoints(a.interpolator, proj, 36);
-
-      // Base dashed geodesic line
-      ctx.strokeStyle = `rgba(${rgb}, 0.34)`;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 4]);
-      for (const seg of segments) {
-        ctx.beginPath();
-        seg.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1])));
-        ctx.stroke();
-      }
-      ctx.setLineDash([]);
-
-      // Animated luminous packet + glowing tail along geodesic
-      const headT = a.progress;
-      const tailLen = 0.14;
-      const tailSteps = 10;
-      const tailPts = [];
-      for (let i = 0; i <= tailSteps; i++) {
-        const t = Math.max(0, headT - tailLen * (1 - i / tailSteps));
-        const [lon, lat] = a.interpolator(t);
-        if (!this._isVisible3D(lon, lat)) continue;
-        const p = proj([lon, lat]);
-        if (p) tailPts.push(p);
-      }
-
-      if (tailPts.length > 1) {
-        for (let i = 1; i < tailPts.length; i++) {
-          const p0 = tailPts[i - 1];
-          const p1 = tailPts[i];
-          if (Math.abs(p1[0] - p0[0]) > this.w * 0.4) continue;
-          const alpha = (i / tailPts.length) * 0.9;
-          ctx.strokeStyle = `rgba(${rgb}, ${alpha.toFixed(2)})`;
-          ctx.lineWidth = 1.9;
-          ctx.beginPath();
-          ctx.moveTo(p0[0], p0[1]);
-          ctx.lineTo(p1[0], p1[1]);
-          ctx.stroke();
-        }
-        const head = tailPts[tailPts.length - 1];
-        ctx.fillStyle = '#ffffff';
-        ctx.shadowColor = color;
-        ctx.shadowBlur = 9;
-        ctx.beginPath();
-        ctx.arc(head[0], head[1], 2.2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.shadowBlur = 0;
-      }
-    }
-    ctx.restore();
-  }
-
-  _drawTraceOverlay(ctx, proj, { crit, ok }) {
-    const wps = this.trace.waypoints || [];
-    if (wps.length < 2) return;
-    const beamColor = this.trace.finished ? ok : crit;
-
-    ctx.save();
-    ctx.shadowColor = beamColor;
-    ctx.shadowBlur = 12;
-
-    // Origin hop ring
-    const origin = wps[0];
-    if (origin && this._isVisible3D(origin.lon, origin.lat)) {
-      const p0 = proj([origin.lon, origin.lat]);
-      if (p0) {
-        ctx.strokeStyle = beamColor;
-        ctx.lineWidth = 1.4;
-        ctx.beginPath();
-        ctx.arc(p0[0], p0[1], 7, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-
-    const maxSeg = Math.min(this.trace.activeStep, wps.length - 1);
-    for (let s = 0; s < maxSeg; s++) {
-      const a = wps[s];
-      const b = wps[s + 1];
-      if (!a || !b) continue;
-      const interp = geoInterpolate([a.lon, a.lat], [b.lon, b.lat]);
-      const isCurrent = s === maxSeg - 1 && !this.trace.finished;
-      const limitT = isCurrent ? this.trace.segProgress : 1.0;
-
-      const steps = 28;
-      let prev = null;
-      ctx.strokeStyle = beamColor;
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      for (let i = 0; i <= steps; i++) {
-        const t = (i / steps) * limitT;
-        const [lon, lat] = interp(t);
-        if (!this._isVisible3D(lon, lat)) {
-          prev = null;
-          continue;
-        }
-        const p = proj([lon, lat]);
-        if (!p) continue;
-        if (!prev || Math.abs(p[0] - prev[0]) > this.w * 0.4) ctx.moveTo(p[0], p[1]);
-        else ctx.lineTo(p[0], p[1]);
-        prev = p;
-      }
-      ctx.stroke();
-
-      // Bright hop node ring
-      const pb = proj([b.lon, b.lat]);
-      if (pb && this._isVisible3D(b.lon, b.lat) && (!isCurrent || limitT > 0.92)) {
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1.4;
-        ctx.beginPath();
-        ctx.arc(pb[0], pb[1], 9, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-    ctx.restore();
-  }
-
-  _drawSatellites(ctx, proj, path, { ok, okRgb }) {
-    ctx.save();
-
-    for (const s of this.satellites) {
-      const isSelected = this.selectedSatId === s.id;
-      const isHovered = this.hoveredItem?.kind === 'sat' && this.hoveredItem.item.id === s.id;
-
-      // 1. Orbital sinusoidal ground track
-      ctx.beginPath();
-      let prevPt = null;
-      const trackSamples = 64;
-      for (let i = -24; i <= trackSamples; i++) {
-        const tFuture = this.time + i * 1.1;
-        const phase = tFuture * s.speed + s.phaseOffset;
-        const lat = Math.sin(phase) * s.inclination;
-        const lon = ((s.lonOffset + (tFuture * s.speed * 57.2958) * 1.15) % 360 + 540) % 360 - 180;
-        if (!this._isVisible3D(lon, lat)) {
-          prevPt = null;
-          continue;
-        }
-        const pt = proj([lon, lat]);
-        if (!pt) continue;
-        if (!prevPt || Math.abs(pt[0] - prevPt[0]) > this.w * 0.35) ctx.moveTo(pt[0], pt[1]);
-        else ctx.lineTo(pt[0], pt[1]);
-        prevPt = pt;
-      }
-      ctx.strokeStyle = isSelected ? `rgba(${okRgb}, 0.65)` : `rgba(${okRgb}, 0.18)`;
-      ctx.lineWidth = isSelected ? 1.3 : 0.8;
-      ctx.setLineDash([2, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // 2. Geodesic sensor swath circle projected onto Earth
-      const footprint = geoCircle().center([s.lon, s.lat]).radius(s.footprintDeg)();
-      ctx.beginPath();
-      path(footprint);
-      ctx.fillStyle = isSelected ? `rgba(${okRgb}, 0.12)` : `rgba(${okRgb}, 0.045)`;
-      ctx.fill();
-      ctx.strokeStyle = isSelected ? `rgba(${okRgb}, 0.72)` : `rgba(${okRgb}, 0.25)`;
-      ctx.lineWidth = isSelected ? 1.1 : 0.7;
-      ctx.stroke();
-
-      if (!this._isVisible3D(s.lon, s.lat)) continue;
-      const pt = proj([s.lon, s.lat]);
-      if (!pt) continue;
-
-      // 3. Downlink laser beam to any ground node inside satellite footprint
-      const footprintRad = (s.footprintDeg * Math.PI) / 180;
-      for (const n of this.nodes) {
-        if (geoDistance([s.lon, s.lat], [n.lon, n.lat]) <= footprintRad) {
-          if (!this._isVisible3D(n.lon, n.lat)) continue;
-          const npt = proj([n.lon, n.lat]);
-          if (!npt) continue;
-          ctx.strokeStyle = `rgba(${okRgb}, 0.55)`;
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(pt[0], pt[1]);
-          ctx.lineTo(npt[0], npt[1]);
-          ctx.stroke();
-        }
-      }
-
-      // 4. Satellite glyph (central diamond + solar array wings)
-      ctx.save();
-      ctx.translate(pt[0], pt[1]);
-      ctx.strokeStyle = ok;
-      ctx.fillStyle = ok;
-      ctx.shadowColor = ok;
-      ctx.shadowBlur = 7;
-      ctx.lineWidth = 1.2;
-
-      // Solar wings
-      ctx.beginPath();
-      ctx.moveTo(-9, 0);
-      ctx.lineTo(-4, 0);
-      ctx.moveTo(4, 0);
-      ctx.lineTo(9, 0);
-      ctx.stroke();
-      ctx.strokeRect(-10, -2.5, 5, 5);
-      ctx.strokeRect(5, -2.5, 5, 5);
-
-      // Core bus diamond
-      ctx.beginPath();
-      ctx.moveTo(0, -3.5);
-      ctx.lineTo(3.5, 0);
-      ctx.lineTo(0, 3.5);
-      ctx.lineTo(-3.5, 0);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-
-      const tag = s.name.split(' ')[0];
-      ctx.font = '8px "SF Mono", Menlo, monospace';
-      const tw = ctx.measureText(tag).width;
-      const lx = pt[0] + 13;
-      const ly = pt[1] + 3;
-      const force = isSelected || isHovered;
-      this._queueLabel(force ? 0 : 2, lx - 2, ly - 8, tw + 4, 10, force, (lctx) => {
-        lctx.font = '8px "SF Mono", Menlo, monospace';
-        lctx.fillStyle = force ? '#ffffff' : `rgba(${okRgb}, 0.85)`;
-        lctx.fillText(tag, lx, ly);
-      });
-
-      if (isSelected) {
-        this._drawReticle(ctx, pt[0], pt[1], ok, 18);
-      }
-    }
-
-    ctx.restore();
-  }
-
   _drawPings(ctx, proj, palette) {
     ctx.save();
     for (const p of this.pings) {
@@ -1571,100 +1142,6 @@ export class WorldMapEngine {
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
-    ctx.restore();
-  }
-
-  _drawNodes(ctx, proj, palette) {
-    ctx.save();
-
-    for (const n of this.nodes) {
-      if (!this._isVisible3D(n.lon, n.lat)) continue;
-      const pt = proj([n.lon, n.lat]);
-      if (!pt) continue;
-
-      const isSelected = this.selectedNodeId === n.id;
-      const isHovered = this.hoveredItem?.kind === 'node' && this.hoveredItem.item.id === n.id;
-      const color =
-        n.type === 'CRITICAL'
-          ? palette.crit
-          : n.type === 'WARNING'
-          ? palette.warn
-          : n.type === 'COVERT'
-          ? palette.covert
-          : palette.accent;
-      const rgb =
-        n.type === 'CRITICAL'
-          ? palette.critRgb
-          : n.type === 'WARNING'
-          ? palette.warnRgb
-          : n.type === 'COVERT'
-          ? palette.covertRgb
-          : palette.accentRgb;
-
-      // Scanline proximity boost in 2D mode
-      const scanDist = this.mode === '2d' ? Math.abs(pt[0] - this.scanX * this.w) : 999;
-      const scanGlow = scanDist < 32 ? 1 - scanDist / 32 : 0;
-
-      // Pulsing outer ring
-      const phase = (this.time * (n.type === 'CRITICAL' ? 1.15 : 0.7) + Math.abs(n.lon) * 0.05) % 1;
-      const pulseR = 4 + phase * (n.type === 'CRITICAL' ? 17 : 12);
-      ctx.strokeStyle = `rgba(${rgb}, ${((1 - phase) * 0.72).toFixed(2)})`;
-      ctx.lineWidth = 1.1;
-      ctx.beginPath();
-      ctx.arc(pt[0], pt[1], pulseR, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // Core tactical marker
-      ctx.save();
-      ctx.fillStyle = color;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered || scanGlow > 0.3 ? 14 : 7;
-      ctx.beginPath();
-      ctx.arc(pt[0], pt[1], isSelected ? 4.3 : n.type === 'CRITICAL' ? 3.7 : 3.0, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Crisp inner white core
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(pt[0], pt[1], 1.35, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-
-      // Callout tag with smart directional anchor + collision culling
-      const font = isSelected || isHovered ? 'bold 9.5px "SF Mono", Menlo, monospace' : '8.5px "SF Mono", Menlo, monospace';
-      ctx.font = font;
-      const label = `${n.code} ${n.city}`;
-      const tw = ctx.measureText(label).width;
-      const pos = n.labelPos || 'tr';
-      const isLeft = pos === 'tl' || pos === 'bl';
-      const isBottom = pos === 'bl' || pos === 'br';
-      const lx = isLeft ? pt[0] - 10 - tw : pt[0] + 10;
-      const ly = isBottom ? pt[1] + 14 : pt[1] - 7;
-      const force = isSelected || isHovered || n.type === 'CRITICAL';
-      const drawLeader = isSelected || n.type === 'CRITICAL' || isHovered || pos !== 'tr';
-
-      this._queueLabel(force ? 0 : 1, lx - 2, ly - 9, tw + 4, 11, force, (lctx) => {
-        if (drawLeader) {
-          lctx.strokeStyle = `rgba(${rgb}, 0.65)`;
-          lctx.lineWidth = 0.8;
-          lctx.beginPath();
-          lctx.moveTo(pt[0] + (isLeft ? -4 : 4), pt[1] + (isBottom ? 3 : -2));
-          lctx.lineTo(isLeft ? lx + tw + 2 : lx - 2, ly - 3);
-          lctx.stroke();
-        }
-        lctx.font = font;
-        lctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
-        lctx.fillRect(lx - 2, ly - 9, tw + 4, 11);
-        lctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
-        lctx.fillText(label, lx, ly);
-      });
-
-      // Animated Target Lock Reticle around selected node
-      if (isSelected) {
-        this._drawReticle(ctx, pt[0], pt[1], color, 17);
-      }
-    }
-
     ctx.restore();
   }
 
@@ -1906,7 +1383,7 @@ export class WorldMapEngine {
       const color = ac.emergency ? crit : isSelected || isHovered ? '#ffffff' : altColor;
 
       // Crisp fading ADS-B breadcrumb wake polyline connected to current position
-      if (Array.isArray(ac.trail) && ac.trail.length > 0) {
+      if (this.layers.trails && Array.isArray(ac.trail) && ac.trail.length > 0) {
         const wakeCoords = ac.trail.slice();
         const last = wakeCoords[wakeCoords.length - 1];
         if (!last || Math.hypot(ac.lon - last[0], ac.lat - last[1]) > 0.001) {
@@ -2146,82 +1623,84 @@ export class WorldMapEngine {
   _drawLiveBgp(ctx, proj, { covert, covertRgb, warn, warnRgb, crit, critRgb }) {
     const cols = this.liveFeeds.data.bgpCollectors || [];
     const pulses = this.liveFeeds.data.bgpPulses || [];
-    if (!cols.length && !pulses.length) return;
+    if (!cols.length && (!this.layers.bgpArcs || !pulses.length)) return;
     const now = Date.now();
 
     ctx.save();
 
     // 1. Live ephemeral BGP geodesic pulse arcs (announcements = covert violet, withdrawals = amber/crit)
-    for (let i = 0; i < pulses.length; i++) {
-      const p = pulses[i];
-      const age = now - p.ts;
-      if (age < 0 || age >= 4200) continue;
-      if (!Number.isFinite(p.lon) || !Number.isFinite(p.lat) || !Number.isFinite(p.toLon) || !Number.isFinite(p.toLat)) {
-        continue;
-      }
-
-      const frac = age / 4200;
-      const fade = 1 - frac;
-      const arcColor = p.isWithdraw ? warn : covert;
-      const arcRgb = p.isWithdraw ? warnRgb : covertRgb;
-      const headGlowColor = p.isWithdraw ? crit : covert;
-
-      if (!p._interp) {
-        p._interp = geoInterpolate([p.lon, p.lat], [p.toLon, p.toLat]);
-      }
-
-      const segments = this._sampleGeodesicScreenPoints(p._interp, proj, 22);
-      ctx.strokeStyle = `rgba(${arcRgb}, ${(fade * (p.isWithdraw ? 0.62 : 0.48)).toFixed(2)})`;
-      ctx.lineWidth = p.isWithdraw ? 1.35 : 1.05;
-      for (const seg of segments) {
-        ctx.beginPath();
-        for (let j = 0; j < seg.length; j++) {
-          if (j === 0) ctx.moveTo(seg[j][0], seg[j][1]);
-          else ctx.lineTo(seg[j][0], seg[j][1]);
+    if (this.layers.bgpArcs) {
+      for (let i = 0; i < pulses.length; i++) {
+        const p = pulses[i];
+        const age = now - p.ts;
+        if (age < 0 || age >= 4200) continue;
+        if (!Number.isFinite(p.lon) || !Number.isFinite(p.lat) || !Number.isFinite(p.toLon) || !Number.isFinite(p.toLat)) {
+          continue;
         }
-        ctx.stroke();
-      }
 
-      // Luminous moving BGP packet head + short trailing wake along frac
-      const tailLen = 0.16;
-      const tailSteps = 6;
-      const tailPts = [];
-      for (let s = 0; s <= tailSteps; s++) {
-        const t = Math.max(0, frac - tailLen * (1 - s / tailSteps));
-        const [lon, lat] = p._interp(t);
-        if (!this._isVisible3D(lon, lat)) continue;
-        const pt = proj([lon, lat]);
-        if (pt) tailPts.push(pt);
-      }
+        const frac = age / 4200;
+        const fade = 1 - frac;
+        const arcColor = p.isWithdraw ? warn : covert;
+        const arcRgb = p.isWithdraw ? warnRgb : covertRgb;
+        const headGlowColor = p.isWithdraw ? crit : covert;
 
-      if (tailPts.length > 1) {
-        ctx.lineWidth = p.isWithdraw ? 2.0 : 1.7;
-        for (let s = 1; s < tailPts.length; s++) {
-          const p0 = tailPts[s - 1];
-          const p1 = tailPts[s];
-          if (Math.abs(p1[0] - p0[0]) > this.w * 0.4) continue;
-          const a = (s / tailPts.length) * fade * 0.95;
-          ctx.strokeStyle = `rgba(${p.isWithdraw ? critRgb : arcRgb}, ${a.toFixed(2)})`;
+        if (!p._interp) {
+          p._interp = geoInterpolate([p.lon, p.lat], [p.toLon, p.toLat]);
+        }
+
+        const segments = this._sampleGeodesicScreenPoints(p._interp, proj, 22);
+        ctx.strokeStyle = `rgba(${arcRgb}, ${(fade * (p.isWithdraw ? 0.62 : 0.48)).toFixed(2)})`;
+        ctx.lineWidth = p.isWithdraw ? 1.35 : 1.05;
+        for (const seg of segments) {
           ctx.beginPath();
-          ctx.moveTo(p0[0], p0[1]);
-          ctx.lineTo(p1[0], p1[1]);
+          for (let j = 0; j < seg.length; j++) {
+            if (j === 0) ctx.moveTo(seg[j][0], seg[j][1]);
+            else ctx.lineTo(seg[j][0], seg[j][1]);
+          }
           ctx.stroke();
         }
-      }
 
-      const [hlon, hlat] = p._interp(frac);
-      if (this._isVisible3D(hlon, hlat)) {
-        const hpt = proj([hlon, hlat]);
-        if (hpt) {
-          ctx.save();
-          ctx.globalAlpha = Math.min(1, fade * 1.4);
-          ctx.fillStyle = p.isWithdraw ? arcColor : '#ffffff';
-          ctx.shadowColor = headGlowColor;
-          ctx.shadowBlur = 8;
-          ctx.beginPath();
-          ctx.arc(hpt[0], hpt[1], p.isWithdraw ? 2.3 : 1.9, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
+        // Luminous moving BGP packet head + short trailing wake along frac
+        const tailLen = 0.16;
+        const tailSteps = 6;
+        const tailPts = [];
+        for (let s = 0; s <= tailSteps; s++) {
+          const t = Math.max(0, frac - tailLen * (1 - s / tailSteps));
+          const [lon, lat] = p._interp(t);
+          if (!this._isVisible3D(lon, lat)) continue;
+          const pt = proj([lon, lat]);
+          if (pt) tailPts.push(pt);
+        }
+
+        if (tailPts.length > 1) {
+          ctx.lineWidth = p.isWithdraw ? 2.0 : 1.7;
+          for (let s = 1; s < tailPts.length; s++) {
+            const p0 = tailPts[s - 1];
+            const p1 = tailPts[s];
+            if (Math.abs(p1[0] - p0[0]) > this.w * 0.4) continue;
+            const a = (s / tailPts.length) * fade * 0.95;
+            ctx.strokeStyle = `rgba(${p.isWithdraw ? critRgb : arcRgb}, ${a.toFixed(2)})`;
+            ctx.beginPath();
+            ctx.moveTo(p0[0], p0[1]);
+            ctx.lineTo(p1[0], p1[1]);
+            ctx.stroke();
+          }
+        }
+
+        const [hlon, hlat] = p._interp(frac);
+        if (this._isVisible3D(hlon, hlat)) {
+          const hpt = proj([hlon, hlat]);
+          if (hpt) {
+            ctx.save();
+            ctx.globalAlpha = Math.min(1, fade * 1.4);
+            ctx.fillStyle = p.isWithdraw ? arcColor : '#ffffff';
+            ctx.shadowColor = headGlowColor;
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            ctx.arc(hpt[0], hpt[1], p.isWithdraw ? 2.3 : 1.9, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
         }
       }
     }

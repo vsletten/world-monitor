@@ -61,31 +61,6 @@ class TacticalAudio {
     this._tone(1480, 0.35, 'sine', 0.06, 0, 1420);
     this._tone(2960, 0.14, 'sine', 0.02, 0.02);
   }
-
-  playTraceHop(step = 0) {
-    const base = 540 + step * 115;
-    this._tone(base, 0.075, 'square', 0.028, 0);
-    this._tone(base * 1.5, 0.06, 'sine', 0.04, 0.045);
-  }
-
-  playTraceConfirmed() {
-    this._tone(880, 0.08, 'sine', 0.05, 0);
-    this._tone(1174, 0.08, 'sine', 0.05, 0.08);
-    this._tone(1760, 0.24, 'sine', 0.06, 0.16);
-  }
-
-  playAlert() {
-    this._tone(440, 0.16, 'sawtooth', 0.04, 0, 620);
-    this._tone(440, 0.16, 'sawtooth', 0.04, 0.22, 620);
-  }
-
-  playDecrypt() {
-    for (let i = 0; i < 6; i++) {
-      const f = 600 + Math.random() * 900;
-      this._tone(f, 0.035, 'square', 0.02, i * 0.045);
-    }
-    this._tone(1380, 0.16, 'sine', 0.05, 0.3);
-  }
 }
 
 export const sfx = new TacticalAudio();

@@ -44,8 +44,8 @@ function kpToScale(kp) {
   if (kp >= 7) return { scale: 'G3', label: 'STRONG STORM', severity: 'WARNING' };
   if (kp >= 6) return { scale: 'G2', label: 'MODERATE STORM', severity: 'WARNING' };
   if (kp >= 5) return { scale: 'G1', label: 'MINOR STORM', severity: 'WARNING' };
-  if (kp >= 4) return { scale: 'G0+', label: 'ACTIVE FIELD', severity: 'ALLIED' };
-  return { scale: 'G0', label: 'QUIET', severity: 'ALLIED' };
+  if (kp >= 4) return { scale: 'G0+', label: 'ACTIVE FIELD', severity: 'INFO' };
+  return { scale: 'G0', label: 'QUIET', severity: 'INFO' };
 }
 
 // Real RIPE RIS Route Collector geographic locations (IXP hubs)
@@ -334,7 +334,7 @@ export class LiveFeedManager {
         if (!wasLive) {
           const via = msg.url?.includes('ris-live.ripe.net') ? 'DIRECT' : 'PROXY';
           this.onLog?.(
-            'SIG',
+            'INFO',
             `RIPE RIS LIVE BGP WEBSOCKET CONNECTED (${via}) — MONITORING GLOBAL IXP ROUTE COLLECTORS.`
           );
         }
@@ -390,7 +390,7 @@ export class LiveFeedManager {
           this._lastBgpLogAt = now;
           const action = msg.sampleLog.isWithdraw ? 'WITHDRAWAL' : 'ANNOUNCE';
           this.onLog?.(
-            msg.sampleLog.isWithdraw ? 'WARN' : 'SIG',
+            msg.sampleLog.isWithdraw ? 'WARN' : 'INFO',
             `RIPE BGP ${action} [${col.code} ${col.city}]: ${msg.sampleLog.asn} → ${msg.sampleLog.prefix} (${this.data.bgpRate || 12} updates/s).`
           );
         }
@@ -921,7 +921,7 @@ export class LiveFeedManager {
             url: f.properties.url || '',
             lat,
             lon,
-            severity: mag >= 5.0 ? 'CRITICAL' : mag >= 4.0 ? 'WARNING' : 'ALLIED',
+            severity: mag >= 5.0 ? 'CRITICAL' : mag >= 4.0 ? 'WARNING' : 'INFO',
           };
         })
         .sort((a, b) => b.mag - a.mag)
@@ -981,7 +981,7 @@ export class LiveFeedManager {
       this.status.eonet = { state: 'live', count: events.length, updatedAt: new Date(), error: null };
       if (events.length > 0) {
         const first = events[0];
-        this.onLog?.('SIG', `NASA EONET LIVE (${events.length} ACTIVE EVENTS): ${first.categoryTitle} — ${first.title}.`);
+        this.onLog?.('INFO', `NASA EONET LIVE (${events.length} ACTIVE EVENTS): ${first.categoryTitle} — ${first.title}.`);
       }
     } catch (err) {
       this.status.eonet = { state: 'error', count: this.data.eonet.length, updatedAt: null, error: err.message };
@@ -1052,7 +1052,7 @@ export class LiveFeedManager {
       if (firstLoad && planes.length > 0) {
         const sample = planes.find((p) => p.altFt > 10000) || planes[0];
         this.onLog?.(
-          'SIG',
+          'INFO',
           `ADS-B MIL TRANSPONDER FEED LIVE (${planes.length} AIRCRAFT): Tracking ${sample.callsign} [${sample.type}] FL${Math.round(sample.altFt / 100)} @ ${sample.gsKts} kts.`
         );
       }
@@ -1291,7 +1291,7 @@ export class LiveFeedManager {
         this._bgpFallbackAttempt = 0;
         ws.send(JSON.stringify({ type: 'ris_subscribe', data: { type: 'UPDATE' } }));
         this.status.bgp = { state: 'live', count: this.data.bgpRate || 1, updatedAt: new Date(), error: null };
-        this.onLog?.('SIG', 'RIPE RIS LIVE BGP WEBSOCKET CONNECTED — MONITORING GLOBAL IXP ROUTE COLLECTORS.');
+        this.onLog?.('INFO', 'RIPE RIS LIVE BGP WEBSOCKET CONNECTED — MONITORING GLOBAL IXP ROUTE COLLECTORS.');
         this.onUpdate?.('bgp');
       };
 
@@ -1328,7 +1328,7 @@ export class LiveFeedManager {
             this._lastBgpLogAt = now;
             const action = isWithdraw ? 'WITHDRAWAL' : 'ANNOUNCE';
             this.onLog?.(
-              isWithdraw ? 'WARN' : 'SIG',
+              isWithdraw ? 'WARN' : 'INFO',
               `RIPE BGP ${action} [${col.code} ${col.city}]: ${asn} → ${prefix} (${this.data.bgpRate || 12} updates/s).`
             );
           }
@@ -1425,7 +1425,7 @@ export class LiveFeedManager {
       if (events.length > 0) {
         const top = events[0];
         this.onLog?.(
-          top.alertLevel === 'Red' ? 'CRIT' : top.alertLevel === 'Orange' ? 'WARN' : 'SIG',
+          top.alertLevel === 'Red' ? 'CRIT' : top.alertLevel === 'Orange' ? 'WARN' : 'INFO',
           `UN GDACS LIVE (${events.length} ALERTS): [${top.alertLevel.toUpperCase()}] ${top.name} — ${top.country}.`
         );
       }
@@ -1470,7 +1470,7 @@ export class LiveFeedManager {
       const windiest = [...stations].sort((a, b) => b.windKmh - a.windKmh)[0];
       if (windiest) {
         this.onLog?.(
-          'SIG',
+          'INFO',
           `OPEN-METEO ATMOSPHERIC LIVE (${stations.length} HUBS): Peak wind ${windiest.windKmh} km/h @ ${windiest.name} (${windiest.tempC}°C, ${windiest.condition}).`
         );
       }
@@ -1562,7 +1562,7 @@ export class LiveFeedManager {
           const sign = sampleForLog.delta >= 0 ? '+' : '';
           this.onWikiPulse?.(sampleForLog.hub, sampleForLog);
           this.onLog?.(
-            'SIG',
+            'INFO',
             `WIKI PULSE [${sampleForLog.hub.lang}]: "${sampleForLog.title}" (${sign}${sampleForLog.delta}B) by ${sampleForLog.user}.`
           );
         }
@@ -1631,7 +1631,7 @@ export class LiveFeedManager {
     if (this.enabled.gdacs) {
       for (const g of this.data.gdacs) {
         const level = g.alertLevel || 'Green';
-        const type = level === 'Red' ? 'CRITICAL' : level === 'Orange' ? 'WARNING' : 'ALLIED';
+        const type = level === 'Red' ? 'CRITICAL' : level === 'Orange' ? 'WARNING' : 'INFO';
         const score = level === 'Red' ? 92 : level === 'Orange' ? 74 : 40;
         items.push({
           kind: 'gdacs',
@@ -1650,11 +1650,11 @@ export class LiveFeedManager {
       }
     }
 
-    // 3. USGS Earthquakes (mag >= 5.0 CRIT, >= 4.0 WARN, >= 3.2 ALLIED; score mag * 15)
+    // 3. USGS Earthquakes (mag >= 5.0 CRIT, >= 4.0 WARN, >= 3.2 INFO; score mag * 15)
     if (this.enabled.quakes) {
       for (const q of this.data.quakes) {
         if (q.mag < 3.2 && !q.tsunami) continue;
-        const type = q.mag >= 5.0 || q.tsunami ? 'CRITICAL' : q.mag >= 4.0 ? 'WARNING' : 'ALLIED';
+        const type = q.mag >= 5.0 || q.tsunami ? 'CRITICAL' : q.mag >= 4.0 ? 'WARNING' : 'INFO';
         const score = Number((q.mag * 15).toFixed(1));
         items.push({
           kind: 'quake',
@@ -1735,7 +1735,7 @@ export class LiveFeedManager {
       }
     }
 
-    // 6. High BGP Withdrawal Activity (COVERT)
+    // 6. High BGP Withdrawal Activity (INFO)
     if (this.enabled.bgp && this.data.bgpWithdrawRate >= 15) {
       const activeCols = [...this.data.bgpCollectors]
         .filter((c) => c.recentRate > 0)
@@ -1750,7 +1750,7 @@ export class LiveFeedManager {
           title: `${col.city} // ${col.ixp}`,
           sub: `${this.data.bgpWithdrawRate}/s WDR • ${col.lastAsn || 'AS?'} ${col.lastPrefix || ''}`.trim(),
           status: `${Math.round(col.recentRate)}/s`,
-          type: 'COVERT',
+          type: 'INFO',
           score: Math.min(84, 52 + Math.round(this.data.bgpWithdrawRate * 0.4)),
           lat: col.lat,
           lon: col.lon,
@@ -1785,28 +1785,31 @@ export class LiveFeedManager {
     let score = 12;
 
     // Seismic contribution
-    let peakMag = 0;
+    let peakQuakeMag = 0;
     let m5Count = 0;
+    let hasTsunami = false;
+    const quakeCount = this.data.quakes.length;
     for (const q of this.data.quakes) {
-      if (q.mag > peakMag) peakMag = q.mag;
+      if (q.mag > peakQuakeMag) peakQuakeMag = q.mag;
       if (q.mag >= 5.0) m5Count++;
+      if (q.tsunami) hasTsunami = true;
     }
-    if (peakMag >= 7.0) score += 28;
-    else if (peakMag >= 6.0) score += 20;
-    else if (peakMag >= 5.0) score += 13;
-    else if (peakMag >= 4.0) score += 6;
-    else if (peakMag >= 3.0) score += 2;
+    if (peakQuakeMag >= 7.0) score += 28;
+    else if (peakQuakeMag >= 6.0) score += 20;
+    else if (peakQuakeMag >= 5.0) score += 13;
+    else if (peakQuakeMag >= 4.0) score += 6;
+    else if (peakQuakeMag >= 3.0) score += 2;
     score += Math.min(10, m5Count * 2);
 
     // GDACS Red/Orange contribution
-    let redCount = 0;
-    let orangeCount = 0;
+    let gdacsRedCount = 0;
+    let gdacsOrangeCount = 0;
     for (const g of this.data.gdacs) {
-      if (g.alertLevel === 'Red') redCount++;
-      else if (g.alertLevel === 'Orange') orangeCount++;
+      if (g.alertLevel === 'Red') gdacsRedCount++;
+      else if (g.alertLevel === 'Orange') gdacsOrangeCount++;
     }
-    score += Math.min(24, redCount * 10);
-    score += Math.min(12, orangeCount * 3);
+    score += Math.min(24, gdacsRedCount * 10);
+    score += Math.min(12, gdacsOrangeCount * 3);
 
     // NOAA Kp & X-ray flare contribution
     if (kp >= 7) score += 16;
@@ -1818,19 +1821,57 @@ export class LiveFeedManager {
     else if (flareClass.startsWith('C')) score += 3;
 
     // ADS-B emergency squawks contribution
-    let emgCount = 0;
+    let emgAircraftCount = 0;
     for (const ac of this.data.aircraft) {
       if (ac.emergency || ac.squawk === '7700' || ac.squawk === '7600' || ac.squawk === '7500') {
-        emgCount++;
+        emgAircraftCount++;
       }
     }
-    score += Math.min(20, emgCount * 12);
+    score += Math.min(20, emgAircraftCount * 12);
 
     // BGP withdrawal rate contribution
     const wdr = this.data.bgpWithdrawRate || 0;
     score += Math.min(14, Math.floor(wdr / 15) * 2);
 
     const anomalyIndex = Number(Math.max(12, Math.min(98, score)).toFixed(1));
+
+    let watchLevel = 1;
+    let watchLabel = 'NOMINAL';
+    if (
+      hasTsunami ||
+      peakQuakeMag >= 7.0 ||
+      gdacsRedCount >= 2 ||
+      kp >= 8 ||
+      flareClass.startsWith('X') ||
+      emgAircraftCount >= 1
+    ) {
+      watchLevel = 5;
+      watchLabel = 'SEVERE';
+    } else if (
+      peakQuakeMag >= 6.0 ||
+      gdacsRedCount >= 1 ||
+      kp >= 6 ||
+      flareClass.startsWith('M')
+    ) {
+      watchLevel = 4;
+      watchLabel = 'HIGH';
+    } else if (
+      peakQuakeMag >= 5.2 ||
+      gdacsOrangeCount >= 2 ||
+      kp >= 5 ||
+      wdr >= 40
+    ) {
+      watchLevel = 3;
+      watchLabel = 'ELEVATED';
+    } else if (
+      peakQuakeMag >= 4.5 ||
+      gdacsOrangeCount >= 1 ||
+      kp >= 4 ||
+      flareClass.startsWith('C')
+    ) {
+      watchLevel = 2;
+      watchLabel = 'GUARDED';
+    }
 
     return {
       anomalyIndex,
@@ -1840,6 +1881,14 @@ export class LiveFeedManager {
       totalRate,
       flareClass,
       kp,
+      peakQuakeMag,
+      quakeCount,
+      gdacsRedCount,
+      gdacsOrangeCount,
+      emgAircraftCount,
+      hasTsunami,
+      watchLevel,
+      watchLabel,
     };
   }
 }
