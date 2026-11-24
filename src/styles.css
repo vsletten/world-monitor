@@ -1389,7 +1389,7 @@ body.is-resizing-col * {
 
 .feed-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, auto));
+  grid-template-columns: repeat(5, minmax(0, auto));
   gap: 3px;
 }
 
@@ -1458,6 +1458,11 @@ body.is-resizing-col * {
 .feed-led.led-meteo { background: #64d8ff; box-shadow: 0 0 5px #64d8ff; }
 .feed-led.led-wiki  { background: #e8f9ff; box-shadow: 0 0 5px #e8f9ff; }
 .feed-led.led-solar { background: var(--ok); box-shadow: 0 0 5px var(--ok); }
+.feed-led.led-outage { background: #ff4d6d; box-shadow: 0 0 5px #ff4d6d; }
+.feed-led.led-launch { background: #ff9f1c; box-shadow: 0 0 5px #ff9f1c; }
+.feed-led.led-news   { background: #a8dadc; box-shadow: 0 0 5px #a8dadc; }
+.feed-led.led-airq   { background: #c77dff; box-shadow: 0 0 5px #c77dff; }
+.feed-led.led-buoy   { background: #00bbf9; box-shadow: 0 0 5px #00bbf9; }
 
 .feed-led.is-loading {
   animation: ledBlink 0.55s infinite;
@@ -1781,14 +1786,116 @@ body.is-resizing-col * {
   text-overflow: ellipsis;
 }
 
+.dossier-factbook {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 7px;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
+  border-left: 2px solid var(--accent);
+  max-height: 220px;
+  overflow-y: auto;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--accent-rgb), 0.35) transparent;
+}
+
+.dossier-factbook::-webkit-scrollbar { width: 4px; }
+.dossier-factbook::-webkit-scrollbar-track { background: transparent; }
+.dossier-factbook::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), 0.32); }
+
+.dossier-factbook.hidden {
+  display: none;
+}
+
+.fb-header,
+.fb-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  padding-bottom: 3px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.16);
+}
+
+.fb-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.fb-cell,
+.fb-item {
+  background: rgba(var(--accent-rgb), 0.04);
+  border: 1px solid rgba(var(--accent-rgb), 0.14);
+  padding: 3px 5px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fb-k,
+.fb-label {
+  font-size: 7.5px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fb-v,
+.fb-val {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-top: 1px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fb-note {
+  font-size: 8.8px;
+  line-height: 1.38;
+  color: var(--text-dim);
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.28);
+  border-left: 2px solid rgba(var(--accent-rgb), 0.35);
+}
+
+.fb-note strong,
+.fb-note-label {
+  color: var(--accent);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
 .dossier-actions {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 5px;
 }
 
+.dossier-actions.cols-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.dossier-actions.cols-3,
 .dossier-actions.has-source {
   grid-template-columns: repeat(3, 1fr);
+}
+
+.dossier-actions.cols-4 {
+  grid-template-columns: repeat(2, 1fr);
 }
 
 .dossier-btn,
@@ -1801,6 +1908,9 @@ body.is-resizing-col * {
   font-weight: 700;
   letter-spacing: 0.08em;
   padding: 5px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
   transition: all 0.14s ease;
 }
@@ -1815,6 +1925,7 @@ body.is-resizing-col * {
   border-color: rgba(var(--accent-rgb), 0.45);
 }
 
+.dossier-btn.hidden,
 .dossier-source-btn.hidden {
   display: none;
 }
@@ -2083,10 +2194,12 @@ body.is-resizing-col * {
   .bottom-bar { padding: 0 7px; gap: 6px; }
   .bottom-telemetry { gap: 7px; }
   .link-badge { display: none; }
+  .feed-grid { grid-template-columns: repeat(4, minmax(0, auto)); }
 }
 
 @media (max-width: 1080px) {
   .clocks-cluster { display: none; }
   .brand-sub { display: none; }
   .ops-grid { --left-w: 230px; --right-w: 250px; }
+  .feed-grid { grid-template-columns: repeat(3, minmax(0, auto)); }
 }

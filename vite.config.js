@@ -8,7 +8,7 @@ dns.setDefaultResultOrder('ipv4first');
 const ipv4HttpsAgent = new https.Agent({
   keepAlive: true,
   family: 4,
-  timeout: 12000,
+  timeout: 18000,
 });
 
 function makeHttpProxy(prefix, target) {
@@ -16,8 +16,8 @@ function makeHttpProxy(prefix, target) {
     target,
     changeOrigin: true,
     agent: ipv4HttpsAgent,
-    timeout: 12000,
-    proxyTimeout: 12000,
+    timeout: 18000,
+    proxyTimeout: 18000,
     rewrite: (p) => p.replace(new RegExp('^/live-api/' + prefix), ''),
     configure: (proxy) => {
       proxy.on('error', (err, _req, res) => {
@@ -59,6 +59,15 @@ const LIVE_PROXY = {
   '/live-api/wiki-de': makeHttpProxy('wiki-de', 'https://de.wikipedia.org'),
   '/live-api/wiki-ja': makeHttpProxy('wiki-ja', 'https://ja.wikipedia.org'),
   '/live-api/wiki-fr': makeHttpProxy('wiki-fr', 'https://fr.wikipedia.org'),
+  '/live-api/ioda': makeHttpProxy('ioda', 'https://api.ioda.inetintel.cc.gatech.edu'),
+  '/live-api/ooni': makeHttpProxy('ooni', 'https://api.ooni.io'),
+  '/live-api/launches': makeHttpProxy('launches', 'https://ll.thespacedevs.com'),
+  '/live-api/gdelt': makeHttpProxy('gdelt', 'https://api.gdeltproject.org'),
+  '/live-api/bbc': makeHttpProxy('bbc', 'https://feeds.bbci.co.uk'),
+  '/live-api/airq': makeHttpProxy('airq', 'https://air-quality-api.open-meteo.com'),
+  '/live-api/ndbc': makeHttpProxy('ndbc', 'https://www.ndbc.noaa.gov'),
+  '/live-api/factbook': makeHttpProxy('factbook', 'https://cdn.jsdelivr.net'),
+  '/live-api/worldbank': makeHttpProxy('worldbank', 'https://api.worldbank.org'),
   '/live-ws/ripe': {
     target: 'wss://ris-live.ripe.net',
     ws: true,

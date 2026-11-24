@@ -21,15 +21,21 @@ import {
   getNightCircleCenter,
 } from './utils.js';
 import { SUBSEA_CABLES } from './subseaCables.js';
+import { findCountryAtLonLat, findCountryByCodeOrName } from './countryIntel.js';
 
 const HIT_PRIORITY_BIAS = {
   liveSat: 1,
   gdacs: 1.5,
+  launch: 1.7,
+  outage: 1.9,
   quake: 2,
   eonet: 2,
   aircraft: 2.5,
   bgp: 3,
+  buoy: 3.2,
+  news: 3.4,
   wiki: 3.5,
+  airq: 3.8,
   meteo: 4,
   cable: 5,
 };
@@ -92,9 +98,15 @@ export class WorldMapEngine {
       gdacs: true,
       meteo: true,
       wiki: true,
+      outages: true,
+      launches: true,
+      news: true,
+      airq: true,
+      buoys: true,
     };
 
-    this.selectedLive = null; // { kind: 'liveSat'|'quake'|'eonet'|'aircraft'|'bgp'|'gdacs'|'meteo'|'wiki'|'cable', id }
+    this.selectedLive = null; // { kind: 'liveSat'|'quake'|'eonet'|'aircraft'|'bgp'|'gdacs'|'meteo'|'wiki'|'outage'|'launch'|'news'|'airq'|'buoy'|'cable'|'country', id }
+    this.selectedLiveItem = null;
     this.hoveredItem = null;
 
     // Expanding sonar ping rings
@@ -212,6 +224,16 @@ export class WorldMapEngine {
 
   _findLiveCoords(sel) {
     if (!sel) return null;
+    if (sel.kind === 'country') {
+      const country =
+        this.selectedLiveItem?.id === sel.id && Number.isFinite(this.selectedLiveItem?.lon) && Number.isFinite(this.selectedLiveItem?.lat)
+          ? this.selectedLiveItem
+          : findCountryByCodeOrName(sel.id);
+      if (country && Number.isFinite(country.lon) && Number.isFinite(country.lat)) {
+        return [country.lon, country.lat];
+      }
+      return null;
+    }
     if (sel.kind === 'cable') {
       const entry = this._cableGeoms.find((c) => c.cable.id === sel.id);
       if (entry && Number.isFinite(entry.cable.lon) && Number.isFinite(entry.cable.lat)) {
@@ -230,6 +252,11 @@ export class WorldMapEngine {
       gdacs: data.gdacs,
       meteo: data.meteo,
       wiki: data.wikiHubs,
+      outage: data.outages,
+      launch: data.launches,
+      news: data.news,
+      airq: data.airq,
+      buoy: data.buoys,
     };
     const list = listMap[sel.kind];
     if (!Array.isArray(list)) return null;
@@ -316,12 +343,13 @@ export class WorldMapEngine {
   selectLive(kind, item, focus = true) {
     if (!item) return;
     this.selectedLive = { kind, id: item.id };
+    this.selectedLiveItem = item;
     const colorVar =
-      kind === 'quake'
+      kind === 'quake' || kind === 'airq'
         ? '--warn'
-        : kind === 'eonet' || kind === 'gdacs'
+        : kind === 'eonet' || kind === 'gdacs' || kind === 'outage'
         ? '--crit'
-        : kind === 'liveSat'
+        : kind === 'liveSat' || kind === 'launch'
         ? '--ok'
         : kind === 'bgp'
         ? '--covert'
@@ -330,12 +358,16 @@ export class WorldMapEngine {
         : '--accent';
     if (Number.isFinite(item.lon) && Number.isFinite(item.lat)) {
       this.triggerPing(item.lon, item.lat, colorVar);
-      if (focus) this.focusLonLat(item.lon, item.lat);
+      if (focus) {
+        const minZoom2D = kind === 'country' ? 1.45 : 1.75;
+        this.focusLonLat(item.lon, item.lat, minZoom2D);
+      }
     }
   }
 
   clearSelection() {
     this.selectedLive = null;
+    this.selectedLiveItem = null;
   }
 
   triggerPing(lon, lat, colorVar = '--accent') {
@@ -480,6 +512,23 @@ export class WorldMapEngine {
 
           this.selectLive(hit.kind, hit.item, false);
           this.onSelectLive?.(hit.kind, hit.item);
+        } else {
+          const inv = proj.invert ? proj.invert([mx, my]) : null;
+          if (
+            inv &&
+            Number.isFinite(inv[0]) &&
+            Number.isFinite(inv[1]) &&
+            Math.abs(inv[1]) <= 90 &&
+            Math.abs(inv[0]) <= 180 &&
+            this._isVisible3D(inv[0], inv[1])
+          ) {
+            const country = findCountryAtLonLat(inv[0], inv[1]);
+            if (country) {
+              this._overlapCycleIdx = 0;
+              this.selectLive('country', country, false);
+              this.onSelectLive?.('country', country);
+            }
+          }
         }
       }
     });
@@ -521,6 +570,7 @@ export class WorldMapEngine {
       if (!Array.isArray(list)) return;
       const bias = HIT_PRIORITY_BIAS[kind] ?? 3;
       for (const item of list) {
+        if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
         if (!this._isVisible3D(item.lon, item.lat)) continue;
         const pt = proj([item.lon, item.lat]);
         if (!pt) continue;
@@ -533,13 +583,18 @@ export class WorldMapEngine {
 
     if (this.liveFeeds) {
       if (this.layers.liveSats) testList(this.liveFeeds.data.liveSats, 'liveSat', 16);
-      if (this.layers.quakes) testList(this.liveFeeds.data.quakes, 'quake', 15);
       if (this.layers.gdacs) testList(this.liveFeeds.data.gdacs, 'gdacs', 15);
+      if (this.layers.launches) testList(this.liveFeeds.data.launches, 'launch', 15);
+      if (this.layers.outages) testList(this.liveFeeds.data.outages, 'outage', 15);
+      if (this.layers.quakes) testList(this.liveFeeds.data.quakes, 'quake', 15);
       if (this.layers.eonet) testList(this.liveFeeds.data.eonet, 'eonet', 14);
       if (this.layers.aircraft) testList(this.liveFeeds.data.aircraft, 'aircraft', 13);
       if (this.layers.bgp) testList(this.liveFeeds.data.bgpCollectors, 'bgp', 13);
-      if (this.layers.meteo) testList(this.liveFeeds.data.meteo, 'meteo', 13);
+      if (this.layers.buoys) testList(this.liveFeeds.data.buoys, 'buoy', 13);
+      if (this.layers.news) testList(this.liveFeeds.data.news, 'news', 13);
       if (this.layers.wiki) testList(this.liveFeeds.data.wikiHubs, 'wiki', 14);
+      if (this.layers.airq) testList(this.liveFeeds.data.airq, 'airq', 13);
+      if (this.layers.meteo) testList(this.liveFeeds.data.meteo, 'meteo', 13);
     }
 
     if (this.layers.cables) {
@@ -707,6 +762,9 @@ export class WorldMapEngine {
       this._drawGlobeFrontRim(ctx, proj, palette);
     }
 
+    // 3b. Selected country polygon highlight (underneath data feed markers)
+    this._drawSelectedCountry(ctx, path, proj, palette);
+
     // 4. Live NOAA Solar / Geomagnetic Aurora Ovals
     if (this.layers.aurora && this.layers.solar && this.liveFeeds?.data.solar) {
       this._drawSolarAurora(ctx, path, palette);
@@ -717,13 +775,18 @@ export class WorldMapEngine {
       this._drawSubseaCables(ctx, path, proj, palette);
     }
 
-    // 6. Live Public Data Overlays: Meteo, BGP IXPs, USGS Quakes, UN GDACS, NASA EONET, Wiki, ADS-B
+    // 6. Live Public Data Overlays: Meteo, Air Quality, Ocean Buoys, BGP IXPs, News, USGS Quakes, UN GDACS, NASA EONET, Outages, Launches, Wiki, ADS-B
     if (this.liveFeeds) {
       if (this.layers.meteo) this._drawLiveMeteo(ctx, proj);
+      if (this.layers.airq) this._drawLiveAirQuality(ctx, proj, palette);
+      if (this.layers.buoys) this._drawLiveBuoys(ctx, proj, palette);
       if (this.layers.bgp) this._drawLiveBgp(ctx, proj, palette);
+      if (this.layers.news) this._drawLiveNews(ctx, proj, palette);
       if (this.layers.quakes) this._drawLiveQuakes(ctx, proj, palette);
       if (this.layers.gdacs) this._drawLiveGdacs(ctx, proj, palette);
       if (this.layers.eonet) this._drawLiveEonet(ctx, proj, palette);
+      if (this.layers.outages) this._drawLiveOutages(ctx, proj, palette);
+      if (this.layers.launches) this._drawLiveLaunches(ctx, proj, palette);
       if (this.layers.wiki) this._drawLiveWiki(ctx, proj);
       if (this.layers.aircraft) this._drawLiveAircraft(ctx, proj, palette);
     }
@@ -1859,6 +1922,479 @@ export class WorldMapEngine {
 
       if (isSelected) {
         this._drawReticle(ctx, pt[0], pt[1], '#e8f9ff', 15);
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawSelectedCountry(ctx, path, proj, palette) {
+    if (this.selectedLive?.kind !== 'country') return;
+    const country =
+      this.selectedLiveItem?.feature && this.selectedLiveItem.id === this.selectedLive.id
+        ? this.selectedLiveItem
+        : findCountryByCodeOrName(this.selectedLive.id);
+    if (!country?.feature) return;
+
+    ctx.save();
+    ctx.beginPath();
+    path(country.feature);
+    ctx.fillStyle = `rgba(${palette.accentRgb}, 0.14)`;
+    ctx.fill();
+    ctx.strokeStyle = palette.accent;
+    ctx.lineWidth = 1.7;
+    ctx.shadowColor = palette.accent;
+    ctx.shadowBlur = 9;
+    ctx.stroke();
+    ctx.restore();
+
+    if (
+      Number.isFinite(country.lon) &&
+      Number.isFinite(country.lat) &&
+      this._isVisible3D(country.lon, country.lat)
+    ) {
+      const pt = proj([country.lon, country.lat]);
+      if (pt) {
+        // Subtle centroid reticle
+        ctx.save();
+        ctx.globalAlpha = 0.72;
+        this._drawReticle(ctx, pt[0], pt[1], palette.accent, 13);
+        ctx.restore();
+
+        const tag = `${country.iso2 ? country.iso2 + ' // ' : ''}${(country.name || 'COUNTRY').toUpperCase()}`;
+        const font = 'bold 8.5px "SF Mono", Menlo, monospace';
+        ctx.font = font;
+        const tw = ctx.measureText(tag).width;
+        const lx = pt[0] + 15;
+        const ly = pt[1] - 6;
+        this._queueLabel(0, lx - 3, ly - 9, tw + 6, 12, true, (lctx) => {
+          lctx.font = font;
+          lctx.fillStyle = 'rgba(3, 9, 17, 0.86)';
+          lctx.fillRect(lx - 3, ly - 9, tw + 6, 12);
+          lctx.strokeStyle = `rgba(${palette.accentRgb}, 0.65)`;
+          lctx.lineWidth = 0.85;
+          lctx.strokeRect(lx - 3, ly - 9, tw + 6, 12);
+          lctx.fillStyle = palette.accent;
+          lctx.fillText(tag, lx, ly);
+        });
+      }
+    }
+  }
+
+  _drawLiveOutages(ctx, proj, { crit, critRgb, warn, warnRgb }) {
+    const outages = this.liveFeeds.data.outages;
+    if (!Array.isArray(outages) || !outages.length) return;
+
+    ctx.save();
+    for (const o of outages) {
+      if (!Number.isFinite(o.lon) || !Number.isFinite(o.lat)) continue;
+      if (!this._isVisible3D(o.lon, o.lat)) continue;
+      const pt = proj([o.lon, o.lat]);
+      if (!pt) continue;
+
+      const isSelected = this.selectedLive?.kind === 'outage' && this.selectedLive.id === o.id;
+      const isHovered = this.hoveredItem?.kind === 'outage' && this.hoveredItem.item.id === o.id;
+      const isCrit = o.severity === 'CRITICAL';
+      const color = isCrit ? crit : warn;
+      const rgb = isCrit ? critRgb : warnRgb;
+
+      // Pulsing network disruption ring
+      const phase = (this.time * (isCrit ? 1.15 : 0.72) + Math.abs(o.lon) * 0.17) % 1;
+      const pulseR = 5.5 + phase * (isCrit ? 15 : 10);
+      ctx.strokeStyle = `rgba(${rgb}, ${((1 - phase) * (isCrit ? 0.8 : 0.58)).toFixed(2)})`;
+      ctx.lineWidth = isCrit ? 1.3 : 1.0;
+      ctx.beginPath();
+      ctx.arc(pt[0], pt[1], pulseR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Disruption diamond with inner X-crosshair
+      ctx.save();
+      ctx.translate(pt[0], pt[1]);
+      ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
+      ctx.fillStyle = `rgba(${rgb}, 0.24)`;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = isSelected || isHovered ? 10 : 5;
+      ctx.lineWidth = 1.25;
+
+      const r = isCrit ? 5.6 : 4.8;
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.lineTo(r, 0);
+      ctx.lineTo(0, r);
+      ctx.lineTo(-r, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Inner X-crosshair (cut / censorship glyph)
+      const xr = r * 0.45;
+      ctx.beginPath();
+      ctx.moveTo(-xr, -xr);
+      ctx.lineTo(xr, xr);
+      ctx.moveTo(xr, -xr);
+      ctx.lineTo(-xr, xr);
+      ctx.stroke();
+      ctx.restore();
+
+      if (isCrit || isSelected || isHovered) {
+        const tag = `${o.countryCode || 'NET'} ${o.source || 'OUTAGE'}`.toUpperCase();
+        const font = 'bold 7.5px "SF Mono", Menlo, monospace';
+        ctx.font = font;
+        const tw = ctx.measureText(tag).width;
+        const lx = pt[0] + 8;
+        const ly = pt[1] - 8;
+        const force = isCrit || isSelected || isHovered;
+        this._queueLabel(force ? 0 : 1, lx, ly, tw + 4, 10, force, (lctx) => {
+          lctx.font = font;
+          lctx.fillStyle = 'rgba(3, 9, 17, 0.82)';
+          lctx.fillRect(lx, ly, tw + 4, 10);
+          lctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
+          lctx.fillText(tag, lx + 2, ly + 8);
+        });
+      }
+
+      if (isSelected) {
+        this._drawReticle(ctx, pt[0], pt[1], color, 16);
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawLiveLaunches(ctx, proj, { ok, okRgb }) {
+    const launches = this.liveFeeds.data.launches;
+    if (!Array.isArray(launches) || !launches.length) return;
+
+    ctx.save();
+    for (const l of launches) {
+      if (!Number.isFinite(l.lon) || !Number.isFinite(l.lat)) continue;
+      if (!this._isVisible3D(l.lon, l.lat)) continue;
+      const pt = proj([l.lon, l.lat]);
+      if (!pt) continue;
+
+      const isSelected = this.selectedLive?.kind === 'launch' && this.selectedLive.id === l.id;
+      const isHovered = this.hoveredItem?.kind === 'launch' && this.hoveredItem.item.id === l.id;
+      const isGo = l.status === 'Go';
+      const color = isGo ? ok : '#ff7b3a';
+      const rgb = isGo ? okRgb : '255, 123, 58';
+      const isImminent = Number.isFinite(l.tMinusSec) && Math.abs(l.tMinusSec) <= 14400;
+
+      // Animated countdown pulse ring within +/- 4h of T-0
+      if (isImminent) {
+        const phase = (this.time * 1.2 + Math.abs(l.lat) * 0.11) % 1;
+        ctx.strokeStyle = `rgba(${rgb}, ${((1 - phase) * 0.85).toFixed(2)})`;
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        ctx.arc(pt[0], pt[1], 5 + phase * 16, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Vertical rocket chevron / gantry pad beacon
+      ctx.save();
+      ctx.translate(pt[0], pt[1]);
+      ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
+      ctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = isSelected || isHovered || isImminent ? 10 : 5;
+      ctx.lineWidth = 1.2;
+
+      // Launch pad base bar
+      ctx.beginPath();
+      ctx.moveTo(-4.6, 4.8);
+      ctx.lineTo(4.6, 4.8);
+      ctx.stroke();
+
+      // Upward rocket chevron
+      ctx.beginPath();
+      ctx.moveTo(0, -6.4);
+      ctx.lineTo(3.5, 2.2);
+      ctx.lineTo(0, 0.2);
+      ctx.lineTo(-3.5, 2.2);
+      ctx.closePath();
+      ctx.fill();
+
+      // Plume ignition point
+      ctx.fillStyle = `rgba(${rgb}, 0.85)`;
+      ctx.beginPath();
+      ctx.arc(0, 3.0, 1.15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      const tag = (l.rocket || l.name || 'LAUNCH').slice(0, 14).toUpperCase();
+      const font = 'bold 7.5px "SF Mono", Menlo, monospace';
+      ctx.font = font;
+      const tw = ctx.measureText(tag).width;
+      const lx = pt[0] + 7;
+      const ly = pt[1] - 9;
+      const force = isSelected || isHovered;
+      this._queueLabel(force ? 0 : 1, lx, ly, tw + 4, 10, force, (lctx) => {
+        lctx.font = font;
+        lctx.fillStyle = 'rgba(3, 9, 17, 0.8)';
+        lctx.fillRect(lx, ly, tw + 4, 10);
+        lctx.fillStyle = force ? '#ffffff' : color;
+        lctx.fillText(tag, lx + 2, ly + 8);
+      });
+
+      if (isSelected) {
+        this._drawReticle(ctx, pt[0], pt[1], color, 16);
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawLiveNews(ctx, proj) {
+    const news = this.liveFeeds.data.news;
+    if (!Array.isArray(news) || !news.length) return;
+    const now = Date.now();
+    const color = '#ffd166';
+    const rgb = '255, 209, 102';
+
+    ctx.save();
+    for (const n of news) {
+      if (!Number.isFinite(n.lon) || !Number.isFinite(n.lat)) continue;
+      if (!this._isVisible3D(n.lon, n.lat)) continue;
+      const pt = proj([n.lon, n.lat]);
+      if (!pt) continue;
+
+      const isSelected = this.selectedLive?.kind === 'news' && this.selectedLive.id === n.id;
+      const isHovered = this.hoveredItem?.kind === 'news' && this.hoveredItem.item.id === n.id;
+      const isFresh = now - (n.timeMs || 0) < 7200000;
+
+      // Subtle pulse ring for breaking stories (< 2h old)
+      if (isFresh) {
+        const phase = (this.time * 0.6 + Math.abs(n.lon) * 0.19) % 1;
+        ctx.strokeStyle = `rgba(${rgb}, ${((1 - phase) * 0.52).toFixed(2)})`;
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        ctx.arc(pt[0], pt[1], 4.5 + phase * 11, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Broadcast diamond + outer corner ticks
+      ctx.save();
+      ctx.translate(pt[0], pt[1]);
+      ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
+      ctx.fillStyle = `rgba(${rgb}, 0.32)`;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = isSelected || isHovered ? 9 : 4;
+      ctx.lineWidth = 1.1;
+
+      const r = 3.8;
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.lineTo(r, 0);
+      ctx.lineTo(0, r);
+      ctx.lineTo(-r, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // 4 outer broadcast corner ticks
+      ctx.shadowBlur = 0;
+      ctx.lineWidth = 0.9;
+      for (let i = 0; i < 4; i++) {
+        const a = (i * Math.PI) / 2 + Math.PI / 4;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * 5.0, Math.sin(a) * 5.0);
+        ctx.lineTo(Math.cos(a) * 6.8, Math.sin(a) * 6.8);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      if (isSelected || isHovered || this.zoom >= 1.6) {
+        const tag = `${n.countryCode || 'GEO'} NEWS`.toUpperCase();
+        const font = 'bold 7.5px "SF Mono", Menlo, monospace';
+        ctx.font = font;
+        const tw = ctx.measureText(tag).width;
+        const lx = pt[0] + 7;
+        const ly = pt[1] - 8;
+        const force = isSelected || isHovered;
+        this._queueLabel(force ? 0 : 3, lx, ly, tw + 4, 10, force, (lctx) => {
+          lctx.font = font;
+          lctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+          lctx.fillRect(lx, ly, tw + 4, 10);
+          lctx.fillStyle = force ? '#ffffff' : color;
+          lctx.fillText(tag, lx + 2, ly + 8);
+        });
+      }
+
+      if (isSelected) {
+        this._drawReticle(ctx, pt[0], pt[1], color, 15);
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawLiveAirQuality(ctx, proj, { crit, critRgb, warn, warnRgb, ok, okRgb }) {
+    const stations = this.liveFeeds.data.airq;
+    if (!Array.isArray(stations) || !stations.length) return;
+
+    ctx.save();
+    for (const a of stations) {
+      if (!Number.isFinite(a.lon) || !Number.isFinite(a.lat)) continue;
+      if (!this._isVisible3D(a.lon, a.lat)) continue;
+      const pt = proj([a.lon, a.lat]);
+      if (!pt) continue;
+
+      const isSelected = this.selectedLive?.kind === 'airq' && this.selectedLive.id === a.id;
+      const isHovered = this.hoveredItem?.kind === 'airq' && this.hoveredItem.item.id === a.id;
+      const aqi = Number(a.usAqi) || 0;
+
+      let color = ok;
+      let rgb = okRgb;
+      if (aqi >= 151) {
+        color = crit;
+        rgb = critRgb;
+      } else if (aqi >= 101) {
+        color = warn;
+        rgb = warnRgb;
+      } else if (aqi >= 51) {
+        color = '#ffd166';
+        rgb = '255, 209, 102';
+      }
+
+      // Concentric atmospheric ring + center dot
+      ctx.save();
+      ctx.translate(pt[0], pt[1]);
+      ctx.fillStyle = `rgba(${rgb}, 0.14)`;
+      ctx.strokeStyle = `rgba(${rgb}, 0.52)`;
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.arc(0, 0, 5.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
+      ctx.lineWidth = 1.05;
+      ctx.beginPath();
+      ctx.arc(0, 0, 3.1, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = isSelected || isHovered ? 8 : 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, 1.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      const tag = `AQI ${a.usAqi}`;
+      const font = '7.5px "SF Mono", Menlo, monospace';
+      ctx.font = font;
+      const tw = ctx.measureText(tag).width;
+      const lx = pt[0] + 7;
+      const ly = pt[1] + 1;
+      const force = aqi >= 135 || isSelected || isHovered;
+      this._queueLabel(force ? 0 : 3, lx, ly, tw + 4, 9.5, force, (lctx) => {
+        lctx.font = font;
+        lctx.fillStyle = 'rgba(3, 9, 17, 0.74)';
+        lctx.fillRect(lx, ly, tw + 4, 9.5);
+        lctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
+        lctx.fillText(tag, lx + 2, ly + 7.5);
+      });
+
+      if (isSelected) {
+        this._drawReticle(ctx, pt[0], pt[1], color, 15);
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawLiveBuoys(ctx, proj, { warn, warnRgb, crit, critRgb }) {
+    const buoys = this.liveFeeds.data.buoys;
+    if (!Array.isArray(buoys) || !buoys.length) return;
+
+    ctx.save();
+    for (const b of buoys) {
+      if (!Number.isFinite(b.lon) || !Number.isFinite(b.lat)) continue;
+      if (!this._isVisible3D(b.lon, b.lat)) continue;
+      const pt = proj([b.lon, b.lat]);
+      if (!pt) continue;
+
+      const isSelected = this.selectedLive?.kind === 'buoy' && this.selectedLive.id === b.id;
+      const isHovered = this.hoveredItem?.kind === 'buoy' && this.hoveredItem.item.id === b.id;
+      const waveM = Number(b.waveM);
+      const hasWave = Number.isFinite(waveM) && waveM > 0;
+      const isHighCrit = hasWave && waveM >= 6.0;
+      const isHighWarn = hasWave && waveM >= 4.5;
+
+      let color = b.isDart ? '#38d9a9' : '#4dabf7';
+      let rgb = b.isDart ? '56, 217, 169' : '77, 171, 247';
+      if (isHighCrit) {
+        color = crit;
+        rgb = critRgb;
+      } else if (isHighWarn) {
+        color = warn;
+        rgb = warnRgb;
+      }
+
+      // Anchored marine diamond glyph (+ outer brackets for DART tsunami buoys)
+      ctx.save();
+      ctx.translate(pt[0], pt[1]);
+      ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
+      ctx.fillStyle = `rgba(${rgb}, 0.28)`;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = isSelected || isHovered ? 9 : 4;
+      ctx.lineWidth = 1.1;
+
+      const r = 3.6;
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.lineTo(r, 0);
+      ctx.lineTo(0, r);
+      ctx.lineTo(-r, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Anchor stem & keel bar
+      ctx.beginPath();
+      ctx.moveTo(0, r);
+      ctx.lineTo(0, r + 2.4);
+      ctx.moveTo(-2.4, r + 2.4);
+      ctx.lineTo(2.4, r + 2.4);
+      ctx.stroke();
+
+      // DART tsunami station outer tactical brackets [ ]
+      if (b.isDart) {
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        // Left bracket
+        ctx.moveTo(-4.4, -3.8);
+        ctx.lineTo(-6.2, -3.8);
+        ctx.lineTo(-6.2, 3.8);
+        ctx.lineTo(-4.4, 3.8);
+        // Right bracket
+        ctx.moveTo(4.4, -3.8);
+        ctx.lineTo(6.2, -3.8);
+        ctx.lineTo(6.2, 3.8);
+        ctx.lineTo(4.4, 3.8);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      if (isHighWarn || isSelected || isHovered) {
+        const tag = b.isDart
+          ? `DART ${b.stationId || ''}`.trim()
+          : hasWave
+          ? `${waveM.toFixed(1)}M`
+          : String(b.stationId || 'BUOY');
+        const font = 'bold 7.5px "SF Mono", Menlo, monospace';
+        ctx.font = font;
+        const tw = ctx.measureText(tag).width;
+        const lx = pt[0] + (b.isDart ? 8 : 6);
+        const ly = pt[1] - 8;
+        const force = isSelected || isHovered || isHighCrit;
+        this._queueLabel(force ? 0 : 2, lx, ly, tw + 4, 10, force, (lctx) => {
+          lctx.font = font;
+          lctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+          lctx.fillRect(lx, ly, tw + 4, 10);
+          lctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
+          lctx.fillText(tag, lx + 2, ly + 8);
+        });
+      }
+
+      if (isSelected) {
+        this._drawReticle(ctx, pt[0], pt[1], color, 15);
       }
     }
     ctx.restore();

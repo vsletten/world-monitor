@@ -11,6 +11,15 @@ const UPSTREAMS = Object.freeze({
   'wiki-de': 'https://de.wikipedia.org',
   'wiki-ja': 'https://ja.wikipedia.org',
   'wiki-fr': 'https://fr.wikipedia.org',
+  ioda: 'https://api.ioda.inetintel.cc.gatech.edu',
+  ooni: 'https://api.ooni.io',
+  launches: 'https://ll.thespacedevs.com',
+  gdelt: 'https://api.gdeltproject.org',
+  bbc: 'https://feeds.bbci.co.uk',
+  airq: 'https://air-quality-api.open-meteo.com',
+  ndbc: 'https://www.ndbc.noaa.gov',
+  factbook: 'https://cdn.jsdelivr.net',
+  worldbank: 'https://api.worldbank.org',
 });
 
 const CORS_HEADERS = {

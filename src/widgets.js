@@ -185,6 +185,46 @@ export class RadarWidget {
       }
     }
 
+    if (Array.isArray(liveData.outages)) {
+      for (const o of liveData.outages) {
+        const severity = o?.severity === 'CRITICAL' ? 'crit' : 'warn';
+        consider(`outage:${o?.id ?? `${o?.lat},${o?.lon}`}`, o?.lat, o?.lon, severity);
+      }
+    }
+
+    if (Array.isArray(liveData.launches)) {
+      for (const l of liveData.launches) {
+        const tMinus = l?.tMinusSec;
+        const imminent = tMinus !== null && tMinus !== undefined && Number.isFinite(Number(tMinus)) && Math.abs(Number(tMinus)) < 7200;
+        const severity = imminent ? 'warn' : 'ok';
+        consider(`launch:${l?.id ?? `${l?.lat},${l?.lon}`}`, l?.lat, l?.lon, severity);
+      }
+    }
+
+    if (Array.isArray(liveData.news)) {
+      for (const n of liveData.news) {
+        consider(`news:${n?.id ?? `${n?.lat},${n?.lon}`}`, n?.lat, n?.lon, 'accent');
+      }
+    }
+
+    if (Array.isArray(liveData.airq)) {
+      for (const a of liveData.airq) {
+        const usAqi = Number(a?.usAqi) || 0;
+        const severity = usAqi >= 151 ? 'crit' : usAqi >= 101 ? 'warn' : 'accent';
+        consider(`airq:${a?.id ?? a?.name ?? `${a?.lat},${a?.lon}`}`, a?.lat, a?.lon, severity);
+      }
+    }
+
+    if (Array.isArray(liveData.buoys)) {
+      for (const b of liveData.buoys) {
+        const waveM = Number(b?.waveM) || 0;
+        const ptdy = Number(b?.ptdyHpa);
+        const dartAlert = Boolean(b?.isDart) && Number.isFinite(ptdy) && ptdy !== 0 && Math.abs(ptdy) >= 3;
+        const severity = dartAlert || waveM >= 6 ? 'crit' : waveM >= 4 ? 'warn' : 'ok';
+        consider(`buoy:${b?.id ?? b?.stationId ?? `${b?.lat},${b?.lon}`}`, b?.lat, b?.lon, severity);
+      }
+    }
+
     contacts.sort((a, b) => a.distKm - b.distKm);
     this.blips = contacts.slice(0, 32);
   }
@@ -324,7 +364,7 @@ export class SpectrumWidget {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.mode = 'goes'; // 'goes' | 'bgp' | 'quakes'
+    this.mode = 'goes'; // 'goes' | 'bgp' | 'quakes' | 'seas'
     this.bgpSmooth = new Float32Array(24);
     this.time = 0;
     this.intensityBoost = 0;
@@ -333,7 +373,7 @@ export class SpectrumWidget {
   }
 
   setMode(mode) {
-    if (['goes', 'bgp', 'quakes'].includes(mode)) {
+    if (['goes', 'bgp', 'quakes', 'seas'].includes(mode)) {
       this.mode = mode;
       this.render(0, false, this.liveData);
     }
@@ -379,6 +419,8 @@ export class SpectrumWidget {
       this._renderGoes(ctx, w, h, palette);
     } else if (this.mode === 'bgp') {
       this._renderBgp(ctx, w, h, dt, palette);
+    } else if (this.mode === 'seas') {
+      this._renderSeas(ctx, w, h, palette);
     } else {
       this._renderQuakes(ctx, w, h, palette);
     }
@@ -831,6 +873,233 @@ export class SpectrumWidget {
     ctx.fillRect(2, splitY + 2, botBadgeW, 10.5);
     ctx.fillStyle = traceColor;
     ctx.fillText(botBadge, 4, splitY + 10);
+  }
+
+  // --------------------------------------------------------------------------
+  // MODE 4: LIVE NOAA NDBC OCEAN WAVE HEIGHT + OPEN-METEO GLOBAL AIR QUALITY
+  // --------------------------------------------------------------------------
+  _renderSeas(ctx, w, h, { accent, accentRgb, ok, okRgb, warn, warnRgb, crit, critRgb }) {
+    const rawBuoys = Array.isArray(this.liveData?.buoys) ? this.liveData.buoys : [];
+    const rawAirq = Array.isArray(this.liveData?.airq) ? this.liveData.airq : [];
+    const splitY = Math.floor(h * 0.56);
+
+    // Subtle divider between Ocean Wave Height (top) and Global Air Quality (bottom)
+    ctx.strokeStyle = `rgba(${accentRgb}, 0.28)`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, splitY + 0.5);
+    ctx.lineTo(w, splitY + 0.5);
+    ctx.stroke();
+
+    const buoys = rawBuoys
+      .filter((b) => {
+        const waveM = Number(b?.waveM);
+        return Number.isFinite(waveM) && waveM > 0;
+      })
+      .sort((a, b) => Number(b.waveM) - Number(a.waveM))
+      .slice(0, 32);
+
+    const airq = rawAirq.filter((a) => Number.isFinite(Number(a?.usAqi)));
+
+    if (!buoys.length && !airq.length) {
+      const sx = ((this.time * 0.6) % 1) * w;
+      ctx.strokeStyle = `rgba(${accentRgb}, 0.4)`;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, h);
+      ctx.stroke();
+      ctx.font = '8.5px "SF Mono", Menlo, monospace';
+      ctx.fillStyle = accent;
+      ctx.fillText('ACQUIRING NOAA NDBC OCEAN & AIR TELEMETRY...', 8, splitY - 12);
+      return;
+    }
+
+    // --- TOP HALF: NOAA NDBC OCEAN SIGNIFICANT WAVE HEIGHT (M) ---
+    if (!buoys.length) {
+      const sx = ((this.time * 0.6) % 1) * w;
+      ctx.strokeStyle = `rgba(${accentRgb}, 0.35)`;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, splitY);
+      ctx.stroke();
+      ctx.font = '8.5px "SF Mono", Menlo, monospace';
+      ctx.fillStyle = accent;
+      ctx.fillText('ACQUIRING NOAA NDBC OCEAN & AIR TELEMETRY...', 8, splitY - 12);
+    } else {
+      const topPad = 13;
+      const plotH = Math.max(16, splitY - topPad - 3);
+      const maxWave = Number(buoys[0].waveM) || 0;
+      const maxWaveScale = Math.max(8, maxWave);
+      const waveToY = (waveM) => {
+        const clamped = Math.max(0, Math.min(maxWaveScale, waveM));
+        return splitY - 2 - (clamped / maxWaveScale) * plotH;
+      };
+
+      const refLines = [
+        { val: 4, label: '4m', stroke: `rgba(${warnRgb}, 0.36)`, labelColor: warn },
+        { val: 6, label: '6m', stroke: `rgba(${critRgb}, 0.46)`, labelColor: crit },
+      ];
+      ctx.font = '7.5px "SF Mono", Menlo, monospace';
+      for (const ref of refLines) {
+        const y = waveToY(ref.val);
+        ctx.strokeStyle = ref.stroke;
+        ctx.lineWidth = 0.7;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w - 16, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = ref.labelColor;
+        ctx.fillText(ref.label, w - 14, y + 2.5);
+      }
+
+      const plotW = w - 17;
+      const slot = plotW / buoys.length;
+      const barW = Math.max(2, Math.min(12, slot - 1.5));
+      const scanIdx = Math.floor((this.time * 9) % buoys.length);
+
+      for (let i = 0; i < buoys.length; i++) {
+        const waveM = Number(buoys[i].waveM) || 0;
+        const y = waveToY(waveM);
+        const bh = Math.max(1.5, splitY - 2 - y);
+        const x = i * slot + (slot - barW) * 0.5;
+
+        let barColor = `rgba(${okRgb}, 0.72)`;
+        let capColor = ok;
+        if (waveM >= 6) {
+          barColor = `rgba(${critRgb}, 0.86)`;
+          capColor = crit;
+        } else if (waveM >= 4) {
+          barColor = `rgba(${warnRgb}, 0.85)`;
+          capColor = warn;
+        } else if (waveM >= 2) {
+          barColor = `rgba(${accentRgb}, 0.76)`;
+          capColor = accent;
+        }
+
+        ctx.fillStyle = i === scanIdx ? '#ffffff' : barColor;
+        ctx.fillRect(x, y, barW, bh);
+        ctx.fillStyle = capColor;
+        ctx.fillRect(x, Math.max(topPad, y - 1.2), barW, 1.4);
+      }
+
+      const topBadge = `NDBC OCEAN BUOYS (${buoys.length} LIVE • MAX ${maxWave.toFixed(1)}M)`;
+      ctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+      const topBadgeW = Math.min(w - 4, Math.ceil(ctx.measureText(topBadge).width) + 6);
+      ctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+      ctx.fillRect(2, 1, topBadgeW, 10.5);
+      ctx.fillStyle = maxWave >= 6 ? crit : maxWave >= 4 ? warn : accent;
+      ctx.fillText(topBadge, 4, 9);
+    }
+
+    // --- BOTTOM HALF: OPEN-METEO GLOBAL URBAN AIR QUALITY (US AQI) ---
+    if (airq.length > 0) {
+      const airTop = splitY + 13;
+      const airBot = h - 4;
+      const airH = Math.max(14, airBot - airTop);
+
+      let maxAqi = 0;
+      let worstStationName = 'N/A';
+      for (let i = 0; i < airq.length; i++) {
+        const aqi = Math.max(0, Number(airq[i].usAqi) || 0);
+        if (aqi >= maxAqi) {
+          maxAqi = aqi;
+          worstStationName = String(airq[i].name || airq[i].city || airq[i].id || 'UNKNOWN').toUpperCase();
+        }
+      }
+      const maxAqiScale = Math.max(200, maxAqi);
+      const aqiToY = (aqi) => {
+        const clamped = Math.max(0, Math.min(maxAqiScale, aqi));
+        return airBot - (clamped / maxAqiScale) * airH;
+      };
+
+      // Dashed threshold cues at AQI 100 (warn) and 150 (crit)
+      const aqiThresholds = [
+        { val: 100, label: '100', stroke: `rgba(${warnRgb}, 0.34)`, labelColor: warn },
+        { val: 150, label: '150', stroke: `rgba(${critRgb}, 0.42)`, labelColor: crit },
+      ];
+      ctx.font = '7px "SF Mono", Menlo, monospace';
+      for (const th of aqiThresholds) {
+        const y = aqiToY(th.val);
+        ctx.strokeStyle = th.stroke;
+        ctx.lineWidth = 0.7;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w - 18, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = th.labelColor;
+        ctx.fillText(th.label, w - 16, y + 2.5);
+      }
+
+      const traceColor = maxAqi >= 151 ? crit : maxAqi >= 101 ? warn : ok;
+      const traceRgb = maxAqi >= 151 ? critRgb : maxAqi >= 101 ? warnRgb : okRgb;
+      const plotW = Math.max(24, w - 22);
+      const slot = plotW / airq.length;
+      const barW = Math.max(1.5, Math.min(8, slot - 1.5));
+
+      for (let i = 0; i < airq.length; i++) {
+        const aqi = Math.max(0, Number(airq[i].usAqi) || 0);
+        const y = aqiToY(aqi);
+        const bh = Math.max(1, airBot - y);
+        const x = 2 + i * slot + (slot - barW) * 0.5;
+        ctx.fillStyle =
+          aqi >= 151
+            ? `rgba(${critRgb}, 0.36)`
+            : aqi >= 101
+            ? `rgba(${warnRgb}, 0.34)`
+            : `rgba(${accentRgb}, 0.28)`;
+        ctx.fillRect(x, y, barW, bh);
+      }
+
+      ctx.save();
+      let lastX = 2 + slot * 0.5;
+      let lastY = aqiToY(Number(airq[airq.length - 1].usAqi) || 0);
+      if (airq.length > 1) {
+        ctx.beginPath();
+        for (let i = 0; i < airq.length; i++) {
+          const x = 2 + (i / (airq.length - 1)) * (plotW - 2);
+          const y = aqiToY(Number(airq[i].usAqi) || 0);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+          lastX = x;
+          lastY = y;
+        }
+        ctx.strokeStyle = traceColor;
+        ctx.lineWidth = 1.35;
+        ctx.shadowColor = traceColor;
+        ctx.shadowBlur = 6;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        ctx.lineTo(lastX, airBot);
+        ctx.lineTo(2, airBot);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(${traceRgb}, 0.12)`;
+        ctx.fill();
+      }
+
+      const pulseR = 2.1 + Math.sin(this.time * 5) * 0.7;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(lastX, lastY, Math.max(1.2, pulseR), 0, TWO_PI);
+      ctx.fill();
+      ctx.restore();
+
+      const botBadge = `GLOBAL AIR QUALITY • PEAK AQI ${Math.round(maxAqi)} (${worstStationName})`;
+      ctx.font = 'bold 8px "SF Mono", Menlo, monospace';
+      const botBadgeW = Math.min(w - 4, Math.ceil(ctx.measureText(botBadge).width) + 6);
+      ctx.fillStyle = 'rgba(3, 9, 17, 0.78)';
+      ctx.fillRect(2, splitY + 2, botBadgeW, 10.5);
+      ctx.fillStyle = traceColor;
+      ctx.fillText(botBadge, 4, splitY + 10);
+    } else {
+      ctx.font = '8px "SF Mono", Menlo, monospace';
+      ctx.fillStyle = `rgba(${accentRgb}, 0.7)`;
+      ctx.fillText('AWAITING GLOBAL AIR QUALITY STATIONS...', 8, splitY + 22);
+    }
   }
 }
 

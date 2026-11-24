@@ -285,7 +285,7 @@ function isSafeHttpUrl(url) {
 }
 
 export function buildExternalSourceUrl(kind, item) {
-  if (!item && kind !== 'cable') return null;
+  if (!item && kind !== 'cable' && kind !== 'solar') return null;
   const data = item || {};
   let result = null;
 
@@ -394,6 +394,7 @@ export function buildExternalSourceUrl(kind, item) {
       };
       break;
     }
+    case 'place':
     case 'meteo': {
       const lat = Number(data.lat);
       const lon = Number(data.lon);
@@ -414,6 +415,109 @@ export function buildExternalSourceUrl(kind, item) {
       result = {
         label: 'SUBSEA MAP ↗',
         url: 'https://www.submarinecablemap.com/',
+      };
+      break;
+    }
+    case 'country': {
+      if (data.openFactbookUrl) {
+        if (!isSafeHttpUrl(data.openFactbookUrl)) return null;
+        result = { label: 'OPEN FACTBOOK ↗', url: data.openFactbookUrl.trim() };
+      } else {
+        const slug = String(data.openFactbookSlug || data.ciaSlug || '').trim();
+        if (slug) {
+          result = {
+            label: 'OPEN FACTBOOK ↗',
+            url:
+              'https://openfactbook.org/countries/' +
+              encodeURIComponent(slug) +
+              '/',
+          };
+        } else if (data.name && String(data.name).trim()) {
+          result = {
+            label: 'WIKIPEDIA ↗',
+            url:
+              'https://en.wikipedia.org/wiki/' +
+              encodeURIComponent(String(data.name).trim().replace(/\s+/g, '_')),
+          };
+        }
+      }
+      break;
+    }
+    case 'outage': {
+      const label =
+        data.source === 'OONI' ? 'OONI EXPLORER ↗' : 'IODA OUTAGES ↗';
+      if (data.reportUrl) {
+        if (!isSafeHttpUrl(data.reportUrl)) return null;
+        result = { label, url: data.reportUrl.trim() };
+      } else {
+        result = {
+          label,
+          url:
+            data.source === 'OONI'
+              ? 'https://explorer.ooni.org/chart/mat?probe_cc=' +
+                encodeURIComponent(data.countryCode || '')
+              : 'https://ioda.inetintel.cc.gatech.edu/country/' +
+                encodeURIComponent(data.countryCode || ''),
+        };
+      }
+      break;
+    }
+    case 'launch': {
+      if (data.webcastUrl) {
+        if (!isSafeHttpUrl(data.webcastUrl)) return null;
+        result = { label: 'WATCH STREAM ↗', url: data.webcastUrl.trim() };
+      } else if (data.infoUrl) {
+        if (!isSafeHttpUrl(data.infoUrl)) return null;
+        result = { label: 'LAUNCH INFO ↗', url: data.infoUrl.trim() };
+      } else {
+        result = {
+          label: 'LAUNCH INFO ↗',
+          url: 'https://nextspaceflight.com/launches/',
+        };
+      }
+      break;
+    }
+    case 'news': {
+      if (data.url) {
+        if (!isSafeHttpUrl(data.url)) return null;
+        result = { label: 'OPEN ARTICLE ↗', url: data.url.trim() };
+      } else {
+        result = {
+          label: 'OPEN ARTICLE ↗',
+          url: 'https://www.bbc.com/news/world',
+        };
+      }
+      break;
+    }
+    case 'airq': {
+      const lat = Number(data.lat || 0);
+      const lon = Number(data.lon || 0);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        result = {
+          label: 'AIR QUALITY ↗',
+          url:
+            'https://www.iqair.com/earth?nav=&lat=' +
+            lat.toFixed(2) +
+            '&lng=' +
+            lon.toFixed(2) +
+            '&zoom=5',
+        };
+      }
+      break;
+    }
+    case 'buoy': {
+      result = {
+        label: 'NOAA NDBC ↗',
+        url:
+          'https://www.ndbc.noaa.gov/station_page.php?station=' +
+          encodeURIComponent(data.stationId || data.id || ''),
+      };
+      break;
+    }
+    case 'solar': {
+      result = {
+        label: 'NOAA SWPC ↗',
+        url: 'https://www.swpc.noaa.gov/',
       };
       break;
     }

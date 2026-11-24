@@ -15,14 +15,37 @@ import {
   buildExternalSourceUrl,
 } from './utils.js';
 import { SUBSEA_CABLES } from './subseaCables.js';
+import {
+  COUNTRY_FEATURES,
+  findCountryAtLonLat,
+  findCountryByCodeOrName,
+  fetchCountryFactbook,
+} from './countryIntel.js';
 
-const HUD_STORAGE_KEY = 'aegis-hud-state-v2';
-const ALL_LIVE_KEYS = ['liveSats', 'quakes', 'eonet', 'aircraft', 'bgp', 'gdacs', 'meteo', 'wiki', 'solar'];
+const HUD_STORAGE_KEY = 'aegis-hud-state-v3';
+const ALL_LIVE_KEYS = [
+  'liveSats',
+  'quakes',
+  'eonet',
+  'aircraft',
+  'bgp',
+  'gdacs',
+  'meteo',
+  'wiki',
+  'solar',
+  'outages',
+  'launches',
+  'news',
+  'airq',
+  'buoys',
+];
 const OVERLAY_LAYERS = ['terminator', 'cables', 'aurora', 'bgpArcs', 'trails', 'grid'];
 const VALID_THEMES = ['cyan', 'amber', 'emerald', 'crimson'];
-const VALID_CHARTS = ['goes', 'bgp', 'quakes'];
+const VALID_CHARTS = ['goes', 'bgp', 'quakes', 'seas'];
 const CLI_COMMANDS = [
   'help',
+  'factbook',
+  'country',
   'focus',
   'feed',
   'feeds',
@@ -59,6 +82,8 @@ const state = {
   nodeFilter: 'ALL',
   logFilter: 'ALL',
   selectedLive: null,
+  hostCountry: null,
+  pendingCountry: null,
   pendingFocus: null,
   autoLockInitial: false,
   logs: [],
@@ -132,8 +157,10 @@ const els = {
   dossierFreq: $('dossierFreq'),
   dossierStatus: $('dossierStatus'),
   dossierActions: $('dossierActions'),
+  dossierFactbook: $('dossierFactbook'),
   btnDossierCenter: $('btnDossierCenter'),
   btnDossierPing: $('btnDossierPing'),
+  btnDossierCountry: $('btnDossierCountry'),
   btnDossierSource: $('btnDossierSource'),
   dossierWeatherVal: $('dossierWeatherVal'),
   radarRngTag: $('radarRngTag'),
@@ -323,6 +350,7 @@ function hydrateInitialConfig() {
   const paramChartRaw = (params.get('chart') || '').toLowerCase();
   const paramChart = VALID_CHARTS.includes(paramChartRaw) ? paramChartRaw : null;
 
+  const paramCountry = (params.get('country') || '').trim();
   const paramFocus = (params.get('focus') || '').trim();
 
   // Apply theme
@@ -375,6 +403,9 @@ function hydrateInitialConfig() {
     applyFeedPreset('none', { silent: true });
   }
 
+  if (paramCountry) {
+    state.pendingCountry = paramCountry;
+  }
   if (paramFocus) {
     state.pendingFocus = paramFocus;
   }
@@ -536,6 +567,107 @@ function renderSatList() {
 // ----------------------------------------------------------------------------
 // TARGET DOSSIER, GEODESIC PROXIMITY RADAR & TELEMETRY CHART MODES
 // ----------------------------------------------------------------------------
+function formatCountdown(tMinusSec) {
+  if (!Number.isFinite(tMinusSec)) return 'TBD';
+  const sign = tMinusSec >= 0 ? '-' : '+';
+  const abs = Math.abs(Math.round(tMinusSec));
+  const days = Math.floor(abs / 86400);
+  const hrs = String(Math.floor((abs % 86400) / 3600)).padStart(2, '0');
+  const mins = String(Math.floor((abs % 3600) / 60)).padStart(2, '0');
+  const secs = String(abs % 60).padStart(2, '0');
+  if (days > 0) {
+    return `T${sign}${String(days).padStart(2, '0')}d ${hrs}:${mins}:${secs}`;
+  }
+  return `T${sign}${hrs}:${mins}:${secs}`;
+}
+
+function resolveCountryQuery(rawQuery) {
+  const q = String(rawQuery || '').trim();
+  if (!q) return null;
+  const direct = findCountryByCodeOrName(q);
+  if (direct) return direct;
+  const lower = q.toLowerCase();
+  return (
+    COUNTRY_FEATURES.find((c) => String(c.name || '').toLowerCase().startsWith(lower)) ||
+    COUNTRY_FEATURES.find((c) => String(c.name || '').toLowerCase().includes(lower)) ||
+    null
+  );
+}
+
+const FACTBOOK_CELLS = [
+  ['CAPITAL', 'capital'],
+  ['GOVERNMENT', 'govType'],
+  ['POPULATION', 'population'],
+  ['GDP (PPP)', 'gdpPpp'],
+  ['GDP / CAPITA', 'gdpPerCapita'],
+  ['TOTAL AREA', 'area'],
+  ['COASTLINE', 'coastline'],
+  ['INTERNET USE', 'internetPct'],
+  ['MOBILE SUBS', 'mobileSubs'],
+  ['ENERGY CAP', 'energyCap'],
+  ['MILITARY % GDP', 'militaryPct'],
+  ['SPACE AGENCY', 'spaceAgency'],
+];
+
+function renderFactbookCard(country, { loading = false, error = null } = {}) {
+  if (!els.dossierFactbook) return;
+  const isoBadge = country?.iso2 || country?.iso3 || country?.region || 'GEO';
+  const headerTitle = `WORLD FACTBOOK // ${isoBadge}`;
+
+  if (loading) {
+    els.dossierFactbook.innerHTML = `
+      <div class="fb-header"><span>${escapeHtml(headerTitle)}</span><span>SYNCING...</span></div>
+      <div class="fb-note">LOADING COUNTRY INTEL (ARCHIVE + WORLD BANK)...</div>
+    `;
+    return;
+  }
+
+  if (error) {
+    els.dossierFactbook.innerHTML = `
+      <div class="fb-header"><span>${escapeHtml(headerTitle)}</span><span>OFFLINE</span></div>
+      <div class="fb-note"><strong>NOTICE</strong>${escapeHtml(error)}</div>
+    `;
+    return;
+  }
+
+  const fb = country?.factbook;
+  if (!fb) {
+    els.dossierFactbook.innerHTML = `
+      <div class="fb-header"><span>${escapeHtml(headerTitle)}</span><span>NO ARCHIVE</span></div>
+      <div class="fb-note"><strong>NOTICE</strong>No World Factbook or World Bank dataset available for ${escapeHtml(country?.name || 'this territory')}.</div>
+    `;
+    return;
+  }
+
+  const sourceBadge = fb.hasWorldBank
+    ? `WORLD BANK LIVE${fb.wbUpdated ? ' • ' + fb.wbUpdated : ''} + ARCHIVE`
+    : 'FACTBOOK ARCHIVE';
+
+  const cellsHtml = FACTBOOK_CELLS.filter(([, key]) => Boolean(fb[key]))
+    .map(
+      ([label, key]) => `
+        <div class="fb-cell">
+          <span class="fb-k">${escapeHtml(label)}</span>
+          <span class="fb-v" title="${escapeHtml(fb[key])}">${escapeHtml(fb[key])}</span>
+        </div>`
+    )
+    .join('');
+
+  const notes = [];
+  if (fb.hazards) {
+    notes.push(`<div class="fb-note"><strong>NATURAL HAZARDS</strong>${escapeHtml(fb.hazards)}</div>`);
+  }
+  if (fb.disputes) {
+    notes.push(`<div class="fb-note"><strong>DISPUTES / ISSUES</strong>${escapeHtml(fb.disputes)}</div>`);
+  }
+
+  els.dossierFactbook.innerHTML = `
+    <div class="fb-header"><span>${escapeHtml(headerTitle)}</span><span>${escapeHtml(sourceBadge)}</span></div>
+    ${cellsHtml ? `<div class="fb-grid">${cellsHtml}</div>` : ''}
+    ${notes.join('')}
+  `;
+}
+
 function setSpectrumMode(mode, { silent = false } = {}) {
   if (!VALID_CHARTS.includes(mode)) return;
   spectrum.setMode(mode);
@@ -548,6 +680,9 @@ function setSpectrumMode(mode, { silent = false } = {}) {
   } else if (mode === 'bgp') {
     els.spectrumTitle.textContent = 'RIPE BGP SPECTRUM';
     els.spectrumLed.className = 'led led-accent';
+  } else if (mode === 'seas') {
+    els.spectrumTitle.textContent = 'NDBC SEAS & GLOBAL AQI';
+    els.spectrumLed.className = 'led led-ok';
   } else {
     els.spectrumTitle.textContent = 'USGS 24H SEISMIC';
     els.spectrumLed.className = 'led led-warn';
@@ -569,6 +704,21 @@ function syncProximityRadar(lat, lon) {
   els.radarRngTag.textContent = `${radar.blips.length} IN 2500KM`;
 }
 
+function syncDossierActionGrid() {
+  if (!els.dossierActions) return;
+  let visibleCount = 2; // CENTER VIEW + LOCATE PING
+  if (els.btnDossierCountry && !els.btnDossierCountry.classList.contains('hidden')) visibleCount++;
+  if (els.btnDossierSource && !els.btnDossierSource.classList.contains('hidden')) visibleCount++;
+  els.dossierActions.classList.remove('has-source', 'cols-2', 'cols-3', 'cols-4');
+  if (visibleCount >= 4) {
+    els.dossierActions.classList.add('cols-4');
+  } else if (visibleCount === 3) {
+    els.dossierActions.classList.add('cols-3');
+  } else {
+    els.dossierActions.classList.add('cols-2');
+  }
+}
+
 function updateDossierSourceLink(kind, item) {
   if (!els.btnDossierSource || !els.dossierActions) return;
   const resolvedKind = kind === 'place' ? 'meteo' : kind;
@@ -577,15 +727,15 @@ function updateDossierSourceLink(kind, item) {
     els.btnDossierSource.href = src.url;
     els.btnDossierSource.textContent = src.label || 'OPEN SOURCE ↗';
     els.btnDossierSource.classList.remove('hidden');
-    els.dossierActions.classList.add('has-source');
   } else {
     els.btnDossierSource.href = '#';
     els.btnDossierSource.classList.add('hidden');
-    els.dossierActions.classList.remove('has-source');
   }
+  syncDossierActionGrid();
 }
 
 let _wxSeq = 0;
+let _factbookSeq = 0;
 async function updateDossierWeather(lat, lon) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
   const seq = ++_wxSeq;
@@ -596,7 +746,8 @@ async function updateDossierWeather(lat, lon) {
     els.dossierWeatherVal.textContent = 'METEO N/A';
     return;
   }
-  els.dossierWeatherVal.textContent = `${wx.tempC}°C • ${wx.windKmh}km/h • ${wx.pressureHpa}hPa • ${wx.condition}`;
+  const aqiSuffix = Number.isFinite(wx.usAqi) ? ` • AQI ${wx.usAqi}` : '';
+  els.dossierWeatherVal.textContent = `${wx.tempC}°C • ${wx.windKmh}km/h • ${wx.pressureHpa}hPa • ${wx.condition}${aqiSuffix}`;
 }
 
 function applyLiveDossierFields(kind, item, { updateRadar = false } = {}) {
@@ -786,6 +937,153 @@ function applyLiveDossierFields(kind, item, { updateRadar = false } = {}) {
     els.dossierSeverity.className = 'status-pill info';
     els.dossierSeverity.textContent = 'GEO WAYPOINT';
     els.dossierLed.className = 'led led-accent';
+  } else if (kind === 'country') {
+    if (updateRadar) radar.setTargetType('INFO');
+    setDossierKeys('ISO / REGION', 'CAPITAL', 'POPULATION');
+    const isoTag = [item.iso2, item.iso3].filter(Boolean).join(' / ') || 'TERR';
+    const fb = item.factbook || null;
+    els.dossierCode.textContent = `FACTBOOK // ${item.iso2 || item.iso3 || 'GEO'}`;
+    els.dossierOp.textContent = String(item.name || 'TERRITORY').toUpperCase();
+    els.dossierLoc.textContent = `${String(item.region || 'GLOBAL').toUpperCase()} • ${isoTag}`;
+    els.dossierCoords.textContent = formatCoord(item.lat, item.lon);
+    els.dossierBrief.textContent =
+      fb?.background ||
+      (item.factbookPath
+        ? `World Factbook + World Bank intelligence profile for ${item.name} (${item.region || 'Global'}). Syncing national brief...`
+        : `Geographic territory profile for ${item.name} (${item.region || 'Global'}).`);
+    els.dossierSignal.textContent = `${item.iso2 || '--'} • ${item.region || 'GLOBAL'}`;
+    els.dossierFreq.textContent = fb?.capital || (item.factbook === undefined ? 'SYNC..' : 'N/A');
+    els.dossierStatus.textContent = fb?.population || (item.factbook === undefined ? 'SYNC..' : 'N/A');
+    els.dossierProtocol.textContent = item.factbook?.hasWorldBank ? 'FACTBOOK+WB' : 'FACTBOOK-ARCH';
+    els.dossierSeverity.className = 'status-pill info';
+    els.dossierSeverity.textContent = 'COUNTRY INTEL';
+    els.dossierLed.className = 'led led-accent';
+  } else if (kind === 'outage') {
+    const isCrit = item.severity === 'CRITICAL';
+    if (updateRadar) radar.setTargetType(isCrit ? 'CRITICAL' : 'WARNING');
+    setDossierKeys('IMPACT', 'COUNTRY', 'ASNS');
+    const src = String(item.source || 'IODA').toUpperCase();
+    const impact = Number.isFinite(item.dropPct)
+      ? `-${item.dropPct}%`
+      : String(item.level || 'ALERT').toUpperCase();
+    const asns =
+      Array.isArray(item.asns) && item.asns.length > 0
+        ? item.asns
+            .slice(0, 3)
+            .map((a) => (String(a).toUpperCase().startsWith('AS') ? a : `AS${a}`))
+            .join(', ') + (item.asns.length > 3 ? ` +${item.asns.length - 3}` : '')
+        : 'NATIONAL';
+    els.dossierCode.textContent = `${src} // ${item.countryCode || 'NET'}`;
+    els.dossierOp.textContent = String(item.title || 'INTERNET OUTAGE').toUpperCase();
+    els.dossierLoc.textContent = `${String(item.countryName || item.countryCode || 'GLOBAL').toUpperCase()} • ${String(item.datasource || src).toUpperCase()}`;
+    els.dossierCoords.textContent = formatCoord(item.lat, item.lon);
+    els.dossierBrief.textContent =
+      item.summary || `Live ${src} internet connectivity anomaly detected in ${item.countryName || 'region'}.`;
+    els.dossierSignal.textContent = impact;
+    els.dossierFreq.textContent = item.countryName || item.countryCode || 'UNKNOWN';
+    els.dossierStatus.textContent = asns;
+    els.dossierProtocol.textContent = src === 'OONI' ? 'OONI-API' : 'IODA-V2';
+    els.dossierSeverity.className = `status-pill ${isCrit ? 'crit' : 'warn'}`;
+    els.dossierSeverity.textContent = isCrit ? 'NET OUTAGE' : 'NET ANOMALY';
+    els.dossierLed.className = `led ${isCrit ? 'led-crit' : 'led-warn'}`;
+  } else if (kind === 'launch') {
+    const isGo = String(item.status || '').toUpperCase() === 'GO' || Boolean(item.webcastLive);
+    const tSec = Number.isFinite(item.tMinusSec)
+      ? item.tMinusSec
+      : Number.isFinite(item.netMs)
+      ? Math.round((item.netMs - Date.now()) / 1000)
+      : NaN;
+    if (updateRadar) radar.setTargetType(isGo ? 'SAT' : 'WARNING');
+    setDossierKeys('COUNTDOWN', 'ORBIT', 'STATUS');
+    els.dossierCode.textContent = `LAUNCH // ${item.status || 'TBD'}`;
+    els.dossierOp.textContent = String(item.rocket || item.name || 'ORBITAL LAUNCH').toUpperCase();
+    els.dossierLoc.textContent = `${item.missionName || item.name || 'MISSION'} • ${item.padName || 'LAUNCH PAD'}`;
+    els.dossierCoords.textContent = formatCoord(item.lat, item.lon);
+    const locSuffix = item.locationName ? ` (${item.locationName})` : '';
+    const desc = item.missionDesc
+      ? ` ${item.missionDesc.slice(0, 220)}${item.missionDesc.length > 220 ? '…' : ''}`
+      : '';
+    els.dossierBrief.textContent = `${item.provider || 'Launch Provider'} orbital launch from ${item.padName || 'Launch Complex'}${locSuffix}.${desc}`;
+    els.dossierSignal.textContent = formatCountdown(tSec);
+    els.dossierFreq.textContent = item.orbit || 'LEO';
+    els.dossierStatus.textContent = item.statusText || item.status || 'SCHEDULED';
+    els.dossierProtocol.textContent = 'LL2-V2.2';
+    els.dossierSeverity.className = `status-pill ${isGo ? 'sat' : 'warn'}`;
+    els.dossierSeverity.textContent = item.webcastLive ? 'LIVE LAUNCH' : isGo ? 'GO FOR LAUNCH' : 'SCHEDULED';
+    els.dossierLed.className = `led ${isGo ? 'led-ok' : 'led-warn'}`;
+  } else if (kind === 'news') {
+    if (updateRadar) radar.setTargetType('INFO');
+    setDossierKeys('SOURCE', 'COUNTRY', 'PUBLISHED');
+    const pubUtc = Number.isFinite(item.timeMs) ? `${tzFormatters.utc.format(new Date(item.timeMs))}Z` : 'LIVE';
+    els.dossierCode.textContent = `OSINT // ${item.countryCode || 'NEWS'}`;
+    els.dossierOp.textContent = String(item.title || 'GLOBAL DISPATCH');
+    els.dossierLoc.textContent = `${item.source || 'WIRE'} • ${item.countryName || 'GLOBAL'}`;
+    els.dossierCoords.textContent = formatCoord(item.lat, item.lon);
+    els.dossierBrief.textContent = item.summary || item.title || 'Geocoded global OSINT news wire dispatch.';
+    els.dossierSignal.textContent = item.source || 'OSINT';
+    els.dossierFreq.textContent = item.countryName || item.countryCode || 'GLOBAL';
+    els.dossierStatus.textContent = pubUtc;
+    els.dossierProtocol.textContent = 'GEO-RSS';
+    els.dossierSeverity.className = 'status-pill info';
+    els.dossierSeverity.textContent = 'GEO NEWS';
+    els.dossierLed.className = 'led led-accent';
+  } else if (kind === 'airq') {
+    const isCrit = item.severity === 'CRITICAL' || item.usAqi >= 151;
+    const isWarn = item.severity === 'WARNING' || item.usAqi >= 101;
+    if (updateRadar) radar.setTargetType(isCrit ? 'CRITICAL' : isWarn ? 'WARNING' : 'INFO');
+    setDossierKeys('US AQI', 'PM2.5', 'UV / DUST');
+    els.dossierCode.textContent = `AIRQ // AQI ${item.usAqi}`;
+    els.dossierOp.textContent = `${String(item.name || '').toUpperCase()} AIR QUALITY`;
+    els.dossierLoc.textContent = `${String(item.category || 'AIR QUALITY').toUpperCase()} • ${item.countryCode || 'GLOBAL'}`;
+    els.dossierCoords.textContent = formatCoord(item.lat, item.lon);
+    els.dossierBrief.textContent = `Live Open-Meteo atmospheric particulate telemetry for ${item.name}. US AQI ${item.usAqi} (${item.category}), PM2.5 ${item.pm25} µg/m³, UV index ${item.uvIndex}, mineral dust ${item.dust} µg/m³.`;
+    els.dossierSignal.textContent = `AQI ${item.usAqi}`;
+    els.dossierFreq.textContent = `PM2.5 ${item.pm25} µg/m³`;
+    els.dossierStatus.textContent = `UV ${item.uvIndex} / DUST ${item.dust}`;
+    els.dossierProtocol.textContent = 'OPEN-METEO-AQ';
+    els.dossierSeverity.className = `status-pill ${isCrit ? 'crit' : isWarn ? 'warn' : 'sat'}`;
+    els.dossierSeverity.textContent = isCrit ? 'UNHEALTHY' : isWarn ? 'ELEVATED AQI' : 'AIR QUALITY';
+    els.dossierLed.className = `led ${isCrit ? 'led-crit' : isWarn ? 'led-warn' : 'led-ok'}`;
+  } else if (kind === 'buoy') {
+    const isCrit = item.severity === 'CRITICAL';
+    const isWarn = item.severity === 'WARNING';
+    if (updateRadar) radar.setTargetType(isCrit ? 'CRITICAL' : isWarn ? 'WARNING' : 'INFO');
+    const waveStr = item.waveM !== null && item.waveM !== undefined ? `${item.waveM.toFixed(1)} m` : 'N/A';
+    const periodStr = item.periodSec !== null && item.periodSec !== undefined ? `${item.periodSec}s` : '--';
+    const presStr = item.presHpa !== null && item.presHpa !== undefined ? `${item.presHpa} hPa` : 'N/A';
+    const ptdyStr =
+      item.ptdyHpa !== null && item.ptdyHpa !== undefined
+        ? `${item.ptdyHpa >= 0 ? '+' : ''}${item.ptdyHpa} hPa`
+        : '--';
+    const waterStr =
+      item.waterTempC !== null && item.waterTempC !== undefined ? `${item.waterTempC.toFixed(1)}°C` : 'N/A';
+    const windStr = item.windMs !== null && item.windMs !== undefined ? `${item.windMs.toFixed(1)} m/s` : 'N/A';
+    els.dossierCode.textContent = `NDBC // ${item.stationId}`;
+    els.dossierOp.textContent = String(item.name || `NDBC ${item.stationId}`).toUpperCase();
+    els.dossierLoc.textContent = item.isDart
+      ? `DART DEEP-OCEAN TSUNAMI SENSOR • ${item.obsTime || 'LIVE'}`
+      : `OFFSHORE WAVE BUOY • ${item.obsTime || 'LIVE'}`;
+    els.dossierCoords.textContent = formatCoord(item.lat, item.lon);
+    if (item.isDart) {
+      setDossierKeys('PRESSURE', 'TENDENCY', 'SEA TEMP');
+      els.dossierBrief.textContent = `NOAA NDBC DART deep-ocean bottom pressure tsunami sensor (${item.stationId}). Pressure ${presStr} (Δ ${ptdyStr}), sea temp ${waterStr}, wave ${waveStr}, wind ${windStr}. Obs: ${item.obsTime || 'N/A'}.`;
+      els.dossierSignal.textContent = presStr;
+      els.dossierFreq.textContent = ptdyStr;
+      els.dossierStatus.textContent = waterStr;
+      els.dossierProtocol.textContent = 'NOAA-DART';
+      els.dossierSeverity.className = `status-pill ${isCrit ? 'crit' : 'sat'}`;
+      els.dossierSeverity.textContent = isCrit ? 'DART ALERT' : 'DART TSUNAMI';
+    } else {
+      setDossierKeys('WAVE HT', 'PERIOD / WIND', 'PRESSURE / SST');
+      els.dossierBrief.textContent = `NOAA NDBC offshore marine telemetry buoy (${item.stationId}). Significant wave height ${waveStr} (${periodStr} period), wind ${windStr}, pressure ${presStr} (Δ ${ptdyStr}), water temp ${waterStr}. Obs: ${item.obsTime || 'N/A'}.`;
+      els.dossierSignal.textContent = waveStr;
+      els.dossierFreq.textContent = `${periodStr} • ${windStr}`;
+      els.dossierStatus.textContent = `${presStr} / ${waterStr}`;
+      els.dossierProtocol.textContent = 'NOAA-NDBC';
+      els.dossierSeverity.className = `status-pill ${isCrit ? 'crit' : isWarn ? 'warn' : 'info'}`;
+      els.dossierSeverity.textContent = isCrit ? 'HIGH SEAS' : isWarn ? 'ROUGH SEAS' : 'OCEAN BUOY';
+    }
+    els.dossierLed.className = `led ${isCrit ? 'led-crit' : isWarn ? 'led-warn' : 'led-accent'}`;
   }
 
   syncProximityRadar(targetLat, targetLon);
@@ -800,7 +1098,55 @@ function selectLiveItem(kind, item, syncMap = true, { silentSound = false } = {}
   spectrum.boost(0.7);
 
   applyLiveDossierFields(kind, item, { updateRadar: true });
-  updateDossierSourceLink(kind, item);
+
+  if (kind === 'country') {
+    state.hostCountry = null;
+    els.btnDossierCountry?.classList.add('hidden');
+    els.dossierFactbook?.classList.remove('hidden');
+    updateDossierSourceLink(kind, item);
+
+    if (item.factbook !== undefined) {
+      renderFactbookCard(item);
+    } else {
+      renderFactbookCard(item, { loading: true });
+      const seq = ++_factbookSeq;
+      fetchCountryFactbook(item)
+        .then((enriched) => {
+          if (seq !== _factbookSeq) return;
+          if (state.selectedLive?.kind !== 'country' || state.selectedLive?.id !== item.id) return;
+          const resolved = enriched || { ...item, factbook: null };
+          state.selectedLive.item = resolved;
+          applyLiveDossierFields('country', resolved, { updateRadar: false });
+          renderFactbookCard(resolved);
+          updateDossierSourceLink('country', resolved);
+        })
+        .catch(() => {
+          if (seq !== _factbookSeq) return;
+          if (state.selectedLive?.kind !== 'country' || state.selectedLive?.id !== item.id) return;
+          const fallback = { ...item, factbook: null };
+          state.selectedLive.item = fallback;
+          applyLiveDossierFields('country', fallback, { updateRadar: false });
+          renderFactbookCard(fallback, { error: 'Unable to fetch Country Intel (World Factbook + World Bank) dataset right now.' });
+        });
+    }
+  } else {
+    ++_factbookSeq;
+    els.dossierFactbook?.classList.add('hidden');
+    const hostCountry =
+      (item.countryCode && findCountryByCodeOrName(item.countryCode)) ||
+      (Number.isFinite(item.lon) && Number.isFinite(item.lat)
+        ? findCountryAtLonLat(item.lon, item.lat)
+        : null);
+    state.hostCountry = hostCountry || null;
+    if (hostCountry && els.btnDossierCountry) {
+      els.btnDossierCountry.textContent = `${hostCountry.iso2 ? `${hostCountry.iso2} ` : ''}FACTBOOK`;
+      els.btnDossierCountry.title = `Open Country Intelligence profile for ${hostCountry.name}`;
+      els.btnDossierCountry.classList.remove('hidden');
+    } else {
+      els.btnDossierCountry?.classList.add('hidden');
+    }
+    updateDossierSourceLink(kind, item);
+  }
 
   renderOpsList();
   renderSatList();
@@ -810,6 +1156,14 @@ function selectLiveItem(kind, item, syncMap = true, { silentSound = false } = {}
 function refreshSelectedLiveDossier() {
   if (!state.selectedLive) return;
   const { kind, id } = state.selectedLive;
+  if (kind === 'country') {
+    const item = state.selectedLive.item;
+    if (item && Number.isFinite(item.lat) && Number.isFinite(item.lon)) {
+      syncProximityRadar(item.lat, item.lon);
+    }
+    return;
+  }
+
   let fresh = null;
   if (kind === 'cable') {
     fresh = SUBSEA_CABLES.find((c) => c.id === id) || state.selectedLive.item;
@@ -864,6 +1218,11 @@ function syncFeedSwitchboard() {
         ? `Kp ${liveFeeds.data.solar.kp.toFixed(1)}`
         : '..'
       : 'OFF',
+    outages: liveFeeds.enabled.outages ? liveFeeds.status.outages.count : 'OFF',
+    launches: liveFeeds.enabled.launches ? liveFeeds.status.launches.count : 'OFF',
+    news: liveFeeds.enabled.news ? liveFeeds.status.news.count : 'OFF',
+    airq: liveFeeds.enabled.airq ? liveFeeds.status.airq.count : 'OFF',
+    buoys: liveFeeds.enabled.buoys ? liveFeeds.status.buoys.count : 'OFF',
   };
 
   $('cntLiveSats').textContent = String(counts.liveSats);
@@ -875,6 +1234,11 @@ function syncFeedSwitchboard() {
   $('cntMeteo').textContent = String(counts.meteo);
   $('cntWiki').textContent = String(counts.wiki);
   $('cntSolar').textContent = String(counts.solar);
+  $('cntOutages').textContent = String(counts.outages);
+  $('cntLaunches').textContent = String(counts.launches);
+  $('cntNews').textContent = String(counts.news);
+  $('cntAirq').textContent = String(counts.airq);
+  $('cntBuoys').textContent = String(counts.buoys);
 
   const feedLedMap = [
     ['liveSats', 'ledLiveSats'],
@@ -886,27 +1250,37 @@ function syncFeedSwitchboard() {
     ['meteo', 'ledMeteo'],
     ['wiki', 'ledWiki'],
     ['solar', 'ledSolar'],
+    ['outages', 'ledOutages'],
+    ['launches', 'ledLaunches'],
+    ['news', 'ledNews'],
+    ['airq', 'ledAirq'],
+    ['buoys', 'ledBuoys'],
   ];
 
   let activeCount = 0;
   for (const [key, ledId] of feedLedMap) {
     if (liveFeeds.enabled[key]) activeCount++;
-    const st = liveFeeds.status[key].state;
+    const st = liveFeeds.status[key]?.state;
     const led = $(ledId);
-    led.classList.toggle('is-loading', liveFeeds.enabled[key] && st === 'loading');
-    led.classList.toggle('is-error', liveFeeds.enabled[key] && st === 'error');
+    led?.classList.toggle('is-loading', liveFeeds.enabled[key] && st === 'loading');
+    led?.classList.toggle('is-error', liveFeeds.enabled[key] && st === 'error');
     const chip = els.feedSwitchboard.querySelector(`.feed-chip[data-feed="${key}"]`);
     chip?.classList.toggle('active', liveFeeds.enabled[key]);
   }
-  els.feedTraySummary.textContent = `DATA FEEDS [${activeCount}/9]`;
+  els.feedTraySummary.textContent = `DATA FEEDS [${activeCount}/14]`;
 
   // Update floating top-left telemetry line with real live counts
   const parts = [];
   if (liveFeeds.enabled.liveSats && liveFeeds.status.liveSats.count) parts.push(`${liveFeeds.status.liveSats.count} SATS`);
   if (liveFeeds.enabled.quakes && liveFeeds.status.quakes.count) parts.push(`${liveFeeds.status.quakes.count} QUAKES`);
   if (liveFeeds.enabled.gdacs && liveFeeds.status.gdacs.count) parts.push(`${liveFeeds.status.gdacs.count} GDACS`);
+  if (liveFeeds.enabled.outages && liveFeeds.status.outages.count) parts.push(`${liveFeeds.status.outages.count} OUTAGES`);
+  if (liveFeeds.enabled.launches && liveFeeds.status.launches.count) parts.push(`${liveFeeds.status.launches.count} LAUNCHES`);
   if (liveFeeds.enabled.eonet && liveFeeds.status.eonet.count) parts.push(`${liveFeeds.status.eonet.count} EONET`);
   if (liveFeeds.enabled.aircraft && liveFeeds.status.aircraft.count) parts.push(`${liveFeeds.status.aircraft.count} MIL ADS-B`);
+  if (liveFeeds.enabled.buoys && liveFeeds.status.buoys.count) parts.push(`${liveFeeds.status.buoys.count} BUOYS`);
+  if (liveFeeds.enabled.news && liveFeeds.status.news.count) parts.push(`${liveFeeds.status.news.count} NEWS`);
+  if (liveFeeds.enabled.airq && liveFeeds.status.airq.count) parts.push(`${liveFeeds.status.airq.count} AQI`);
   if (liveFeeds.enabled.bgp && liveFeeds.status.bgp.state === 'live') parts.push(`BGP ${liveFeeds.data.bgpRate}/s`);
   if (liveFeeds.enabled.solar && liveFeeds.data.solar) parts.push(`Kp ${liveFeeds.data.solar.kp.toFixed(1)}`);
 
@@ -950,7 +1324,7 @@ function applyFeedPreset(preset, { silent = false } = {}) {
     ALL_LIVE_KEYS.forEach((k) => toggleDataset(k, true, { silent: true }));
     if (!silent) {
       sfx.playClick();
-      pushLog('INFO', 'FEED PRESET [ALL]: ALL 9 LIVE PUBLIC TELEMETRY FEEDS ENABLED.');
+      pushLog('INFO', 'FEED PRESET [ALL]: ALL 14 LIVE PUBLIC TELEMETRY FEEDS ENABLED.');
     }
   } else if (preset === 'none') {
     ALL_LIVE_KEYS.forEach((k) => toggleDataset(k, false, { silent: true }));
@@ -1048,6 +1422,60 @@ function renderTooltip(hit, mx, my) {
       <div class="tt-sub">Kp ${escapeHtml(kpVal)} • GOES X-RAY ${escapeHtml(flare)}</div>
       <div class="tt-meta">${escapeHtml(label)}</div>
     `;
+  } else if (hit.kind === 'outage') {
+    const o = hit.item;
+    const impact = Number.isFinite(o.dropPct) ? `-${o.dropPct}% DROP` : String(o.level || 'ALERT').toUpperCase();
+    html = `
+      <div class="tt-head"><span>${escapeHtml(o.countryName || o.countryCode || 'OUTAGE')}</span><span>${escapeHtml(o.source || 'IODA')}</span></div>
+      <div class="tt-sub">${escapeHtml(o.title)}</div>
+      <div class="tt-meta">${escapeHtml(impact)} • ${escapeHtml(String(o.datasource || 'NET').toUpperCase())}</div>
+    `;
+  } else if (hit.kind === 'launch') {
+    const l = hit.item;
+    const tSec = Number.isFinite(l.tMinusSec)
+      ? l.tMinusSec
+      : Number.isFinite(l.netMs)
+      ? Math.round((l.netMs - Date.now()) / 1000)
+      : NaN;
+    html = `
+      <div class="tt-head"><span>${escapeHtml(l.rocket || l.name)}</span><span>${escapeHtml(l.status || 'TBD')}</span></div>
+      <div class="tt-sub">${escapeHtml(l.missionName || l.name)} • ${escapeHtml(formatCountdown(tSec))}</div>
+      <div class="tt-meta">${escapeHtml(l.orbit || 'LEO')} • ${escapeHtml(l.padName || '')}</div>
+    `;
+  } else if (hit.kind === 'news') {
+    const n = hit.item;
+    const rawTitle = String(n.title || '');
+    const titleShort = rawTitle.length > 78 ? `${rawTitle.slice(0, 77)}…` : rawTitle;
+    html = `
+      <div class="tt-head"><span>${escapeHtml(n.countryName || n.countryCode || 'GLOBAL')}</span><span>${escapeHtml(n.source || 'OSINT')}</span></div>
+      <div class="tt-sub">${escapeHtml(titleShort)}</div>
+      <div class="tt-meta">${escapeHtml(formatCoord(n.lat, n.lon))} • GEO NEWS</div>
+    `;
+  } else if (hit.kind === 'airq') {
+    const a = hit.item;
+    html = `
+      <div class="tt-head"><span>${escapeHtml(a.name)} AIR QUALITY</span><span>AQI ${escapeHtml(a.usAqi)}</span></div>
+      <div class="tt-sub">${escapeHtml(a.category)} • PM2.5 ${escapeHtml(a.pm25)} µg/m³</div>
+      <div class="tt-meta">UV ${escapeHtml(a.uvIndex)} • DUST ${escapeHtml(a.dust)} µg/m³</div>
+    `;
+  } else if (hit.kind === 'buoy') {
+    const b = hit.item;
+    const detail = b.isDart
+      ? `PRES ${b.presHpa !== null && b.presHpa !== undefined ? `${b.presHpa} hPa` : 'N/A'} • Δ ${b.ptdyHpa !== null && b.ptdyHpa !== undefined ? `${b.ptdyHpa >= 0 ? '+' : ''}${b.ptdyHpa} hPa` : '--'}`
+      : `WAVE ${b.waveM !== null && b.waveM !== undefined ? `${b.waveM.toFixed(1)}m` : 'N/A'} • PER ${b.periodSec ?? '--'}s • WIND ${b.windMs !== null && b.windMs !== undefined ? `${b.windMs.toFixed(1)}m/s` : 'N/A'}`;
+    const sst = b.waterTempC !== null && b.waterTempC !== undefined ? `${b.waterTempC.toFixed(1)}°C` : 'N/A';
+    html = `
+      <div class="tt-head"><span>${escapeHtml(b.name)}</span><span>${b.isDart ? 'DART' : 'NDBC'}</span></div>
+      <div class="tt-sub">${escapeHtml(detail)}</div>
+      <div class="tt-meta">SST ${escapeHtml(sst)} • ${escapeHtml(formatCoord(b.lat, b.lon))}</div>
+    `;
+  } else if (hit.kind === 'country') {
+    const c = hit.item;
+    html = `
+      <div class="tt-head"><span>${escapeHtml(c.name)}</span><span>${escapeHtml(c.iso2 || 'FACTBOOK')}</span></div>
+      <div class="tt-sub">${escapeHtml(c.region || 'GLOBAL')}</div>
+      <div class="tt-meta">Click to inspect World Factbook + World Bank</div>
+    `;
   }
 
   if (hit.overlapCount > 1) {
@@ -1137,6 +1565,35 @@ function focusTargetByQuery(rawQuery, { silentNotFound = false } = {}) {
     return true;
   }
 
+  const launch = (liveFeeds.data.launches || []).find(
+    (l) =>
+      String(l.name || '').toLowerCase().includes(arg) ||
+      String(l.rocket || '').toLowerCase().includes(arg) ||
+      String(l.missionName || '').toLowerCase().includes(arg) ||
+      String(l.provider || '').toLowerCase().includes(arg) ||
+      String(l.padName || '').toLowerCase().includes(arg)
+  );
+  if (launch) {
+    state.autoLockInitial = false;
+    selectLiveItem('launch', launch, true);
+    pushLog('SAT', `ORBITAL LAUNCH LOCK ENGAGED ON ${launch.rocket || launch.name} (${launch.status}).`);
+    return true;
+  }
+
+  const outage = (liveFeeds.data.outages || []).find(
+    (o) =>
+      String(o.title || '').toLowerCase().includes(arg) ||
+      String(o.countryName || '').toLowerCase().includes(arg) ||
+      String(o.countryCode || '').toLowerCase() === arg ||
+      String(o.source || '').toLowerCase() === arg
+  );
+  if (outage) {
+    state.autoLockInitial = false;
+    selectLiveItem('outage', outage, true);
+    pushLog('WARN', `NET OUTAGE LOCK ENGAGED ON ${outage.title} [${outage.source}].`);
+    return true;
+  }
+
   const ac = liveFeeds.data.aircraft.find(
     (a) =>
       a.callsign.toLowerCase().includes(arg) ||
@@ -1147,6 +1604,18 @@ function focusTargetByQuery(rawQuery, { silentNotFound = false } = {}) {
     state.autoLockInitial = false;
     selectLiveItem('aircraft', ac, true);
     pushLog('INFO', `ADS-B LOCK ENGAGED ON ${ac.callsign} [${ac.type}].`);
+    return true;
+  }
+
+  const buoy = (liveFeeds.data.buoys || []).find(
+    (b) =>
+      String(b.stationId || '').toLowerCase() === arg ||
+      String(b.name || '').toLowerCase().includes(arg)
+  );
+  if (buoy) {
+    state.autoLockInitial = false;
+    selectLiveItem('buoy', buoy, true);
+    pushLog('INFO', `NOAA NDBC LOCK ENGAGED ON ${buoy.name}.`);
     return true;
   }
 
@@ -1192,6 +1661,33 @@ function focusTargetByQuery(rawQuery, { silentNotFound = false } = {}) {
     return true;
   }
 
+  const airq = (liveFeeds.data.airq || []).find(
+    (a) =>
+      String(a.name || '').toLowerCase().includes(arg) ||
+      String(a.countryCode || '').toLowerCase() === arg ||
+      String(a.category || '').toLowerCase().includes(arg)
+  );
+  if (airq) {
+    state.autoLockInitial = false;
+    selectLiveItem('airq', airq, true);
+    pushLog('INFO', `AIR QUALITY LOCK ENGAGED ON ${airq.name} (AQI ${airq.usAqi}).`);
+    return true;
+  }
+
+  const newsItem = (liveFeeds.data.news || []).find(
+    (n) =>
+      String(n.title || '').toLowerCase().includes(arg) ||
+      String(n.countryName || '').toLowerCase().includes(arg) ||
+      String(n.countryCode || '').toLowerCase() === arg ||
+      String(n.source || '').toLowerCase().includes(arg)
+  );
+  if (newsItem) {
+    state.autoLockInitial = false;
+    selectLiveItem('news', newsItem, true);
+    pushLog('INFO', `OSINT NEWS LOCK ENGAGED: ${newsItem.title.slice(0, 72)}.`);
+    return true;
+  }
+
   const meteo = liveFeeds.data.meteo.find(
     (m) =>
       m.name.toLowerCase().includes(arg) ||
@@ -1217,8 +1713,16 @@ function focusTargetByQuery(rawQuery, { silentNotFound = false } = {}) {
     return true;
   }
 
+  const country = resolveCountryQuery(arg);
+  if (country) {
+    state.autoLockInitial = false;
+    selectLiveItem('country', country, true);
+    pushLog('INFO', `COUNTRY INTEL LOCK ENGAGED ON ${country.name.toUpperCase()} (${country.iso2 || country.region}).`);
+    return true;
+  }
+
   if (!silentNotFound) {
-    pushLog('WARN', `No satellite, aircraft, cable, event, IXP, station, or place matching "${arg}".`);
+    pushLog('WARN', `No satellite, launch, outage, aircraft, buoy, cable, event, IXP, station, place, or country matching "${arg}".`);
   }
   return false;
 }
@@ -1271,20 +1775,43 @@ function getCommandSuggestion(rawValue) {
       candidates = ['left', 'right', 'show', 'hide'];
       break;
     case 'feed':
-      candidates = ['sats', 'quakes', 'eonet', 'aircraft', 'bgp', 'gdacs', 'meteo', 'wiki', 'solar'];
+      candidates = [
+        'sats',
+        'quakes',
+        'eonet',
+        'aircraft',
+        'bgp',
+        'gdacs',
+        'meteo',
+        'wiki',
+        'solar',
+        'outages',
+        'launches',
+        'news',
+        'airq',
+        'buoys',
+      ];
       break;
     case 'feeds':
       candidates = ['all', 'none'];
+      break;
+    case 'factbook':
+    case 'country':
+      candidates = COUNTRY_FEATURES.map((c) => c.name.toLowerCase());
       break;
     case 'focus':
     case 'lock':
     case 'goto':
       candidates = [
         ...liveFeeds.data.liveSats.map((s) => s.name.toLowerCase()),
+        ...(liveFeeds.data.launches || []).map((l) => String(l.rocket || l.name || '').toLowerCase()),
         ...WORLD_PLACES.map((p) => p.name.toLowerCase()),
         ...SUBSEA_CABLES.map((c) => c.name.toLowerCase()),
         ...liveFeeds.data.bgpCollectors.map((c) => c.code.toLowerCase()),
         ...liveFeeds.data.aircraft.slice(0, 30).map((a) => a.callsign.toLowerCase()),
+        ...(liveFeeds.data.buoys || []).slice(0, 20).map((b) => String(b.stationId || '').toLowerCase()),
+        ...(liveFeeds.data.airq || []).map((a) => String(a.name || '').toLowerCase()),
+        ...COUNTRY_FEATURES.map((c) => c.name.toLowerCase()),
       ];
       break;
     default:
@@ -1324,15 +1851,32 @@ function handleCommand(raw) {
     case '?':
       pushLog(
         'CMD',
-        'COMMANDS: focus <iss|place|cable|callsign|ixp|event> | feed <sats|quakes|eonet|aircraft|bgp|gdacs|meteo|wiki|solar> | feeds <all|none> | terminator | cables | aurora | bgparcs | trails | grid | chart <goes|bgp|quakes> | refresh | mode <2d|globe> | panels [left|right|show|hide] | maponly | resetlayout | theme <cyan|amber|emerald|crimson> | center | ping | clear | status'
+        'COMMANDS: factbook <country> (alias country) | focus <iss|falcon|country|place|cable|callsign|buoy|ixp|event> | feed <sats|quakes|eonet|aircraft|bgp|gdacs|meteo|wiki|solar|outages|launches|news|airq|buoys> | feeds <all|none> | terminator | cables | aurora | bgparcs | trails | grid | chart <goes|bgp|quakes|seas> | refresh | mode <2d|globe> | panels [left|right|show|hide] | maponly | resetlayout | theme <cyan|amber|emerald|crimson> | center | ping | clear | status'
       );
       break;
+
+    case 'factbook':
+    case 'country': {
+      if (!arg) {
+        pushLog('WARN', 'Usage: factbook <country name or ISO code> (e.g. factbook japan, factbook ua, country brazil)');
+        break;
+      }
+      const country = resolveCountryQuery(arg);
+      if (country) {
+        state.autoLockInitial = false;
+        selectLiveItem('country', country, true);
+        pushLog('INFO', `WORLD FACTBOOK + WORLD BANK PROFILE OPENED: ${country.name.toUpperCase()} (${country.iso2 || country.region}).`);
+      } else {
+        pushLog('WARN', `No country or territory matching "${arg}".`);
+      }
+      break;
+    }
 
     case 'focus':
     case 'lock':
     case 'goto': {
       if (!arg) {
-        pushLog('WARN', 'Usage: focus <satellite, place, cable, event, IXP, or callsign> (e.g. focus iss, focus hormuz, focus marea)');
+        pushLog('WARN', 'Usage: focus <satellite, launch, outage, country, place, cable, buoy, event, IXP, or callsign> (e.g. focus iss, focus falcon, focus hormuz)');
         break;
       }
       focusTargetByQuery(arg);
@@ -1418,11 +1962,31 @@ function handleCommand(raw) {
         wiki: 'wiki',
         solar: 'solar',
         noaa: 'solar',
+        outage: 'outages',
+        outages: 'outages',
+        ioda: 'outages',
+        ooni: 'outages',
+        launch: 'launches',
+        launches: 'launches',
+        rocket: 'launches',
+        rockets: 'launches',
+        news: 'news',
+        geonews: 'news',
+        bbc: 'news',
+        airq: 'airq',
+        aqi: 'airq',
+        airqual: 'airq',
+        pm25: 'airq',
+        buoy: 'buoys',
+        buoys: 'buoys',
+        ndbc: 'buoys',
+        dart: 'buoys',
+        seas: 'buoys',
       }[arg];
       if (mapKey) {
         toggleDataset(mapKey);
       } else {
-        pushLog('WARN', 'Usage: feed <sats|quakes|eonet|aircraft|bgp|gdacs|meteo|wiki|solar>');
+        pushLog('WARN', 'Usage: feed <sats|quakes|eonet|aircraft|bgp|gdacs|meteo|wiki|solar|outages|launches|news|airq|buoys>');
       }
       break;
     }
@@ -1439,7 +2003,7 @@ function handleCommand(raw) {
         setSpectrumMode(arg);
         pushLog('INFO', `TELEMETRY CHART SWITCHED TO ${arg.toUpperCase()} MODE.`);
       } else {
-        pushLog('WARN', 'Usage: chart <goes | bgp | quakes>');
+        pushLog('WARN', 'Usage: chart <goes | bgp | quakes | seas>');
       }
       break;
 
@@ -1806,6 +2370,13 @@ function bindUIEvents() {
   // Dossier action buttons
   els.btnDossierCenter?.addEventListener('click', centerOnLockedTarget);
   els.btnDossierPing?.addEventListener('click', triggerSonarPing);
+  els.btnDossierCountry?.addEventListener('click', () => {
+    if (!state.hostCountry) return;
+    state.autoLockInitial = false;
+    const target = state.hostCountry;
+    selectLiveItem('country', target, true);
+    pushLog('INFO', `WORLD FACTBOOK + WORLD BANK PROFILE OPENED: ${target.name.toUpperCase()} (${target.iso2 || target.region}).`);
+  });
 
   // Overlay layer toggle pills (1..6)
   $('layerToggles').addEventListener('click', (e) => {
@@ -2096,7 +2667,17 @@ function init() {
   renderOpsList();
 
   let matchedInitialFocus = false;
-  if (state.pendingFocus) {
+  if (state.pendingCountry) {
+    const country = resolveCountryQuery(state.pendingCountry);
+    if (country) {
+      state.autoLockInitial = false;
+      selectLiveItem('country', country, true, { silentSound: true });
+      matchedInitialFocus = true;
+    }
+    state.pendingCountry = null;
+  }
+
+  if (!matchedInitialFocus && state.pendingFocus) {
     matchedInitialFocus = focusTargetByQuery(state.pendingFocus, { silentNotFound: true });
     if (matchedInitialFocus) {
       state.pendingFocus = null;
@@ -2117,7 +2698,7 @@ function init() {
   state.hydrating = false;
 
   // Seed initial boot status & kick off real live public telemetry feeds
-  pushLog('INFO', 'AEGIS GLOBAL TELEMETRY MONITOR ONLINE // CONNECTING 9 LIVE PUBLIC FEEDS...');
+  pushLog('INFO', 'AEGIS GLOBAL TELEMETRY MONITOR ONLINE // CONNECTING 14 LIVE PUBLIC FEEDS...');
   liveFeeds.start();
 
   setInterval(() => {

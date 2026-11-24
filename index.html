@@ -27,11 +27,11 @@
         </div>
         <div class="brand-text">
           <div class="brand-title">AEGIS <span class="sep">//</span> GLOBAL TELEMETRY MONITOR</div>
-          <div class="brand-sub">OPEN-SOURCE SITUATION ROOM <span class="dot-sep">•</span> 9 LIVE PUBLIC FEEDS <span class="dot-sep">//</span> WGS-84</div>
+          <div class="brand-sub">OPEN-SOURCE SITUATION ROOM <span class="dot-sep">•</span> 14 LIVE PUBLIC FEEDS + COUNTRY INTEL <span class="dot-sep">//</span> WGS-84</div>
         </div>
       </div>
 
-      <div class="watch-cluster" title="Live global watch level derived from USGS, UN GDACS, NOAA SWPC &amp; ADS-B — click to focus top active event">
+      <div class="watch-cluster" title="Live global watch level derived from USGS, UN GDACS, IODA, NDBC, NOAA SWPC &amp; ADS-B — click to focus top active event">
         <button class="watch-btn" id="watchBtn" data-watch="1">
           <span class="watch-label">GLOBAL WATCH</span>
           <span class="watch-val" id="watchVal">NOMINAL</span>
@@ -117,7 +117,7 @@
               <button class="micro-tab" data-filter="INFO">INFO</button>
             </div>
             <div class="ops-search-wrap">
-              <input type="text" id="opsSearchInput" class="ops-search-input" placeholder="Filter quakes, crises, aircraft, IXPs..." spellcheck="false" aria-label="Filter live global events" />
+              <input type="text" id="opsSearchInput" class="ops-search-input" placeholder="Filter quakes, crises, outages, launches, news..." spellcheck="false" aria-label="Filter live global events" />
               <button type="button" id="opsSearchClear" class="ops-search-clear hidden" title="Clear search">×</button>
             </div>
           </div>
@@ -212,15 +212,15 @@
         <!-- Hover Tooltip -->
         <div class="map-tooltip hidden" id="mapTooltip"></div>
 
-        <!-- Floating Bottom-Left Collapsible 9-Feed Live Switchboard -->
+        <!-- Floating Bottom-Left Collapsible 14-Feed Live Switchboard -->
         <div class="map-hud-bl feed-switchboard" id="feedSwitchboard" role="group" aria-label="Toggle live public datasets">
           <div class="feed-bar-head">
             <button class="feed-collapse-btn" id="btnToggleFeedTray" title="Collapse/expand data feeds tray">
-              <span class="feed-head-title" id="feedTraySummary">DATA FEEDS [9/9]</span>
+              <span class="feed-head-title" id="feedTraySummary">DATA FEEDS [14/14]</span>
               <span id="feedTrayChevron">▾</span>
             </button>
             <div class="feed-head-actions">
-              <button class="feed-mini-act" id="btnFeedsAll" title="Enable all 9 live datasets">ALL</button>
+              <button class="feed-mini-act" id="btnFeedsAll" title="Enable all 14 live datasets">ALL</button>
               <button class="feed-mini-act" id="btnFeedsClear" title="Mute all datasets (wireframe only)">NONE</button>
               <button class="feed-refresh-btn" id="btnRefreshFeeds" title="Force refresh all enabled live public APIs">↻</button>
             </div>
@@ -252,6 +252,21 @@
             </button>
             <button class="feed-chip active" data-feed="solar" title="Live NOAA geomagnetic Kp &amp; polar aurora ovals">
               <i class="feed-led led-solar" id="ledSolar"></i>SOLAR <b id="cntSolar">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="outages" title="Live Georgia Tech IODA &amp; OONI global internet outages">
+              <i class="feed-led led-outage" id="ledOutages"></i>OUTAGES <b id="cntOutages">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="launches" title="Live Launch Library 2 upcoming orbital rocket launches">
+              <i class="feed-led led-launch" id="ledLaunches"></i>LAUNCHES <b id="cntLaunches">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="news" title="Live geocoded BBC World RSS &amp; Wikimedia global news wire">
+              <i class="feed-led led-news" id="ledNews"></i>GEO NEWS <b id="cntNews">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="airq" title="Live Open-Meteo global US AQI, PM2.5, UV &amp; dust hubs">
+              <i class="feed-led led-airq" id="ledAirq"></i>AIR QUAL <b id="cntAirq">..</b>
+            </button>
+            <button class="feed-chip active" data-feed="buoys" title="Live NOAA NDBC ocean wave buoys &amp; DART tsunami sensors">
+              <i class="feed-led led-buoy" id="ledBuoys"></i>BUOYS <b id="cntBuoys">..</b>
             </button>
           </div>
         </div>
@@ -317,9 +332,12 @@
               <span class="wx-val" id="dossierWeatherVal">SYNCING OPEN-METEO...</span>
             </div>
 
+            <div class="dossier-factbook hidden" id="dossierFactbook"></div>
+
             <div class="dossier-actions" id="dossierActions">
               <button class="dossier-btn" id="btnDossierCenter" title="Center and zoom map onto locked target">CENTER VIEW</button>
               <button class="dossier-btn" id="btnDossierPing" title="Emit locator pulse on map and proximity scope">LOCATE PING</button>
+              <button class="dossier-btn hidden" id="btnDossierCountry" title="Open Country Intelligence profile (World Factbook Archive + Live World Bank)">FACTBOOK</button>
               <a class="dossier-source-btn hidden" id="btnDossierSource" href="#" target="_blank" rel="noopener noreferrer" title="Open primary external telemetry source">OPEN SOURCE ↗</a>
             </div>
           </div>
@@ -327,7 +345,7 @@
 
         <div class="panel-splitter" role="separator" aria-orientation="horizontal" title="Drag to resize • Double-click to reset"></div>
 
-        <!-- LIVE GOES SOLAR X-RAY / RIPE BGP / USGS SEISMIC TELEMETRY -->
+        <!-- LIVE GOES SOLAR X-RAY / RIPE BGP / USGS SEISMIC / NDBC SEAS TELEMETRY -->
         <section class="hud-panel panel-spectrum" data-panel-id="spectrum" data-default-weight="24">
           <div class="panel-header">
             <span class="panel-title"><i class="led led-ok" id="spectrumLed"></i><span id="spectrumTitle">GOES SOLAR FLUX</span></span>
@@ -336,6 +354,7 @@
                 <button class="micro-tab active" data-spec="goes" title="Live NOAA GOES-18 X-Ray &amp; GOES-19 Magnetometer">GOES</button>
                 <button class="micro-tab" data-spec="bgp" title="Live RIPE RIS BGP per-IXP spectrum">BGP</button>
                 <button class="micro-tab" data-spec="quakes" title="Live 24-hour USGS seismic magnitude &amp; focal depth">QUAKES</button>
+                <button class="micro-tab" data-spec="seas" title="Live NOAA NDBC Ocean Wave Height &amp; Global Air Quality">SEAS</button>
               </div>
               <button class="panel-collapse-btn" title="Collapse/expand panel" aria-expanded="true">▾</button>
             </div>
@@ -385,7 +404,7 @@
           type="text"
           id="cmdInput"
           class="cmd-input"
-          placeholder="help, focus iss, focus hormuz, chart quakes, cables, mode globe, theme amber..."
+          placeholder="help, factbook japan, focus iss, focus falcon, chart seas, cables, mode globe..."
           spellcheck="false"
         />
         <span class="cmd-hint" id="cmdHint"></span>
