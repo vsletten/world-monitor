@@ -5,9 +5,9 @@
   "type": "module",
   "description": "AEGIS // Global Live Telemetry & OSINT Monitor",
   "scripts": {
-    "dev": "vite --port 4173 --host 127.0.0.1",
+    "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview --port 4173 --host 127.0.0.1"
+    "preview": "vite preview"
   },
   "dependencies": {
     "d3-geo": "^3.1.1",
@@ -17,5 +17,9 @@
   },
   "devDependencies": {
     "vite": "^6.2.0"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "fsevents@2.3.3": true
   }
 }

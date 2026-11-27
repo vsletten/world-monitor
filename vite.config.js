@@ -1,6 +1,24 @@
 import dns from 'node:dns';
 import https from 'node:https';
-import { defineConfig } from 'vite';
+import { createLogger, defineConfig } from 'vite';
+
+// Browser-side WebSocket teardown (page reload, HMR full reload, tab close, or the
+// telemetry worker being terminated) resets the proxied client socket abruptly.
+// Vite logs these as "ws proxy socket error: ECONNRESET" even though they are
+// harmless, so drop just those benign disconnect codes and keep everything else.
+const BENIGN_SOCKET_CODES = new Set(['ECONNRESET', 'EPIPE', 'ECONNABORTED']);
+const logger = createLogger();
+const baseLoggerError = logger.error.bind(logger);
+logger.error = (msg, options) => {
+  if (
+    typeof msg === 'string' &&
+    msg.includes('ws proxy') &&
+    BENIGN_SOCKET_CODES.has(options?.error?.code)
+  ) {
+    return;
+  }
+  baseLoggerError(msg, options);
+};
 
 // Prefer IPv4 A records on dual-stack hosts (e.g. api.open-meteo.com) where IPv6 blackholes in Node TLSWrap
 dns.setDefaultResultOrder('ipv4first');
@@ -87,19 +105,37 @@ const LIVE_PROXY = {
 };
 
 export default defineConfig({
+  customLogger: logger,
   plugins: [skipUnusedSatelliteWasm],
-  worker: { format: 'es' },
+  // Worker bundles do not inherit top-level plugins, so the satellite.js WASM
+  // stub must be registered here too (telemetryWorker.js imports satellite.js).
+  worker: { format: 'es', plugins: () => [skipUnusedSatelliteWasm] },
   build: {
     target: 'esnext',
+    // The 50m world-atlas TopoJSON alone is ~750 kB, so split static geodata and
+    // third-party code into their own long-cache chunks and size the warning
+    // threshold to that unavoidable data chunk.
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/world-atlas/')) return 'geodata';
+          if (id.includes('node_modules/')) return 'vendor';
+          return undefined;
+        },
+      },
+    },
   },
   optimizeDeps: {
     esbuildOptions: {
       target: 'esnext',
     },
   },
+  // Dev and preview use distinct ports so both can run side by side;
+  // with strictPort, sharing 4173 made `npm run preview` fail while dev was up.
   server: {
     host: '127.0.0.1',
-    port: 4173,
+    port: 5173,
     strictPort: true,
     proxy: LIVE_PROXY,
   },

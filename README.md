@@ -48,9 +48,9 @@ npm install
 npm run dev
 ```
 
-Then open **http://127.0.0.1:4173/**.
+Then open **http://127.0.0.1:5173/**.
 
-Production build & preview:
+Production build & preview (served at **http://127.0.0.1:4173/**, so it can run alongside the dev server):
 
 ```bash
 npm run build
