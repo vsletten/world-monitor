@@ -1383,8 +1383,10 @@ export class WorldMapEngine {
       ctx.translate(pt[0], pt[1]);
       ctx.strokeStyle = color;
       ctx.fillStyle = color;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered ? 10 : 5;
+      if (isSelected || isHovered) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 10;
+      }
       ctx.lineWidth = 1.2;
 
       if (ev.categoryId === 'volcanoes') {
@@ -1502,8 +1504,10 @@ export class WorldMapEngine {
 
       // Tactical delta jet chevron pointing north (0 deg = up)
       ctx.fillStyle = color;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered ? 9 : 4;
+      if (isSelected || isHovered || ac.emergency) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 9;
+      }
       ctx.beginPath();
       ctx.moveTo(0, -5);
       ctx.lineTo(3.6, 3.8);
@@ -1588,8 +1592,10 @@ export class WorldMapEngine {
       ctx.translate(pt[0], pt[1]);
       ctx.strokeStyle = satColor;
       ctx.fillStyle = satColor;
-      ctx.shadowColor = satColor;
-      ctx.shadowBlur = isIss || isSelected || isHovered ? 10 : 6;
+      if (isIss || isSelected || isHovered) {
+        ctx.shadowColor = satColor;
+        ctx.shadowBlur = 10;
+      }
       ctx.lineWidth = 1.25;
 
       const span = isIss ? 11 : 8;
@@ -2011,8 +2017,10 @@ export class WorldMapEngine {
       ctx.translate(pt[0], pt[1]);
       ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
       ctx.fillStyle = `rgba(${rgb}, 0.24)`;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered ? 10 : 5;
+      if (isSelected || isHovered) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 10;
+      }
       ctx.lineWidth = 1.25;
 
       const r = isCrit ? 5.6 : 4.8;
@@ -2092,8 +2100,10 @@ export class WorldMapEngine {
       ctx.translate(pt[0], pt[1]);
       ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
       ctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered || isImminent ? 10 : 5;
+      if (isSelected || isHovered || isImminent) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 10;
+      }
       ctx.lineWidth = 1.2;
 
       // Launch pad base bar
@@ -2173,8 +2183,10 @@ export class WorldMapEngine {
       ctx.translate(pt[0], pt[1]);
       ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
       ctx.fillStyle = `rgba(${rgb}, 0.32)`;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered ? 9 : 4;
+      if (isSelected || isHovered) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 9;
+      }
       ctx.lineWidth = 1.1;
 
       const r = 3.8;
@@ -2269,8 +2281,10 @@ export class WorldMapEngine {
       ctx.stroke();
 
       ctx.fillStyle = isSelected || isHovered ? '#ffffff' : color;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered ? 8 : 3;
+      if (isSelected || isHovered) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+      }
       ctx.beginPath();
       ctx.arc(0, 0, 1.35, 0, Math.PI * 2);
       ctx.fill();
@@ -2331,8 +2345,10 @@ export class WorldMapEngine {
       ctx.translate(pt[0], pt[1]);
       ctx.strokeStyle = isSelected || isHovered ? '#ffffff' : color;
       ctx.fillStyle = `rgba(${rgb}, 0.28)`;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = isSelected || isHovered ? 9 : 4;
+      if (isSelected || isHovered) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 9;
+      }
       ctx.lineWidth = 1.1;
 
       const r = 3.6;

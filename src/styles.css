@@ -1267,10 +1267,9 @@ body.is-resizing-col * {
 .map-hud-tl {
   top: 10px;
   left: 12px;
-  background: rgba(3, 9, 17, 0.72);
+  background: rgba(3, 9, 17, 0.88);
   border-left: 2px solid var(--accent);
   padding: 5px 9px;
-  backdrop-filter: blur(4px);
 }
 
 .map-hud-title {
@@ -1327,9 +1326,8 @@ body.is-resizing-col * {
   gap: 4px;
   max-width: calc(100% - 255px);
   padding: 4px 6px;
-  background: rgba(3, 9, 17, 0.88);
+  background: rgba(3, 9, 17, 0.93);
   border: 1px solid rgba(var(--accent-rgb), 0.28);
-  backdrop-filter: blur(5px);
 }
 
 .feed-switchboard {

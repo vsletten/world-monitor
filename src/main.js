@@ -2603,16 +2603,27 @@ function updateTelemetryMeters({ pushSpark = true } = {}) {
 }
 
 // ----------------------------------------------------------------------------
-// MAIN ANIMATION LOOP (PAUSES AUTOMATICALLY WHEN TAB IS HIDDEN)
+// MAIN ANIMATION LOOP (ADAPTIVE 60 FPS CAP + IDLE/UNFOCUSED/HIDDEN THROTTLE)
 // ----------------------------------------------------------------------------
 let lastTime = performance.now();
+let lastRender = 0;
+let lastInteract = lastTime;
 let fpsFrames = 0;
 let fpsLastCheck = lastTime;
 let rafId = null;
 
+const bumpInteract = () => {
+  lastInteract = performance.now();
+};
+window.addEventListener('pointerdown', bumpInteract, { passive: true });
+window.addEventListener('pointermove', bumpInteract, { passive: true });
+window.addEventListener('wheel', bumpInteract, { passive: true });
+window.addEventListener('keydown', bumpInteract, { passive: true });
+
 function startLoop() {
   if (rafId !== null || document.hidden) return;
   lastTime = performance.now();
+  lastRender = 0;
   fpsFrames = 0;
   fpsLastCheck = lastTime;
   rafId = requestAnimationFrame(tick);
@@ -2632,16 +2643,36 @@ function tick(now) {
   }
   rafId = requestAnimationFrame(tick);
 
-  const dt = Math.max(0.001, Math.min(0.05, (now - lastTime) / 1000));
+  const hasFocus = document.hasFocus();
+  const recent = (now - lastInteract) < 1500;
+  const activeMotion =
+    recent ||
+    mapEngine.dragging ||
+    Boolean(mapEngine.target2D) ||
+    Boolean(mapEngine.targetRotation) ||
+    mapEngine.pings.length > 0 ||
+    (mapEngine.mode === '3d' && mapEngine.autoRotate);
+
+  // Cap at 60 FPS active (prevents 120 FPS ProMotion burn), 30 FPS idle 2D, 12 FPS unfocused
+  let minFrameMs = 15.8;
+  if (!hasFocus && !recent) minFrameMs = 83;
+  else if (!activeMotion) minFrameMs = 32;
+
+  if (lastRender > 0 && (now - lastRender) < minFrameMs) return;
+
+  const dt = Math.max(0.001, Math.min(0.1, (now - lastTime) / 1000));
   lastTime = now;
+  lastRender = now;
 
   liveFeeds.stepRealtime(Date.now());
   mapEngine.render(dt);
-  radar.render(dt);
-  spectrum.render(dt, false, liveFeeds.data);
+  if (state.rightOpen) {
+    radar.render(dt);
+    spectrum.render(dt, false, liveFeeds.data);
+  }
 
   fpsFrames++;
-  if (now - fpsLastCheck >= 600) {
+  if (now - fpsLastCheck >= 650) {
     const fps = Math.round((fpsFrames * 1000) / (now - fpsLastCheck));
     els.fpsReadout.textContent = `${fps} FPS`;
     fpsFrames = 0;
